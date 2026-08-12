@@ -1,0 +1,7 @@
+node_modules/
+ui/dist/
+shell/target/
+*.tsbuildinfo
+.env.local
+poc.stdout.log
+poc.stderr.log
