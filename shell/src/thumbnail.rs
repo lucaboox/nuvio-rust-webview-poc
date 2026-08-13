@@ -87,7 +87,7 @@ fn capture_into(
             bail!("mpv_create failed for the thumbnailer");
         }
 
-        let mut set = |name: &str, value: &str| -> Result<()> {
+        let set = |name: &str, value: &str| -> Result<()> {
             let name_c = CString::new(name)?;
             let value_c = CString::new(value)?;
             if mpv_set_option_string(handle, name_c.as_ptr(), value_c.as_ptr()) < 0 {

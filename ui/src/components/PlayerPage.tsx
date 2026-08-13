@@ -368,10 +368,10 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
 
   function onStagePointerDown(event: React.PointerEvent) {
     if (covered) return;
-    if (event.button === 2 && client.holdToSpeed) {
+    if (event.button === 2 && settings?.holdToSpeed !== false) {
       event.preventDefault();
       setSpeeding(true);
-      command("player.setSpeed", { speed: client.holdSpeed });
+      command("player.setSpeed", { speed: settings?.holdToSpeedValue ?? 2 });
       return;
     }
     if (event.button !== 0 || !client.clickToPause) return;
@@ -430,7 +430,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
       </div>
     )}
     {speeding && (
-      <div className="player-speed-flag" role="status">{client.holdSpeed}x</div>
+      <div className="player-speed-flag" role="status">{settings?.holdToSpeedValue ?? 2}x</div>
     )}
     {seekBusy && !state.loading && !state.error && (
       <div className="player-seek-busy" role="status"><i className="loading-spinner" /></div>

@@ -1127,11 +1127,28 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     // started playback, even if the user switches profiles mid-episode.
                     let auth = state.auth.clone();
                     let profile_id = state.active_profile_index;
+                    // Subtitle appearance is read at load time; mpv applies
+                    // these per file, not globally.
+                    let subtitle_style =
+                        crate::settings::load(&state.auth, state.active_profile_index)
+                            .map(|(snapshot, _)| crate::player::SubtitleStyle {
+                                font_size: snapshot.subtitle_font_size,
+                                bold: snapshot.subtitle_bold,
+                                text_color: snapshot.subtitle_text_color,
+                                background_color: snapshot.subtitle_background_color,
+                                outline_enabled: snapshot.subtitle_outline,
+                                outline_color: snapshot.subtitle_outline_color,
+                                outline_width: snapshot.subtitle_outline_width,
+                                bottom_offset: snapshot.subtitle_bottom_offset,
+                                use_libass: snapshot.use_libass,
+                            })
+                            .unwrap_or_default();
                     match state.player.prepare(
                         media_id.to_string(),
                         url,
                         request_headers,
                         start_position_ms,
+                        subtitle_style,
                         // Fires once, as the playback loop tears down. Progress mid-episode
                         // is not checkpointed, so a crash loses the session.
                         Box::new(move |position, duration, reached_eof| {

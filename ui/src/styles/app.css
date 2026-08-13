@@ -841,3 +841,37 @@ button { font: inherit; }
 .player-seek-preview img { display: block; width: 168px; aspect-ratio: 16/9; border-radius: 5px; object-fit: cover; background: #0d0d0d; }
 .player-seek-preview-pending { display: grid; place-items: center; width: 168px; aspect-ratio: 16/9; border-radius: 5px; background: #0d0d0d; }
 .player-seek-preview span { color: #d5d9de; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* Settings: search, results and the new control types. */
+.settings-side { display: grid; gap: 12px; align-content: start; position: sticky; top: 12px; }
+.settings-side .settings-nav { position: static; }
+.settings-search { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border: 1px solid #333a43; border-radius: 10px; background: #262a30; cursor: text; }
+.settings-search:focus-within { border-color: #4d5761; }
+.settings-search > svg { flex-shrink: 0; color: #79828c; }
+.settings-search input { flex: 1; min-width: 0; border: 0; outline: 0; color: #e3e6ea; background: none; font: inherit; font-size: 12px; }
+.settings-search input::placeholder { color: #79828c; }
+.amoled .settings-search { border-color: #262626; background: #181818; }
+
+.settings-hit { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 13px 16px; border: 0; border-bottom: 1px solid #333840; color: inherit; background: none; text-align: left; cursor: pointer; }
+.settings-hit:last-child { border-bottom: 0; }
+.settings-hit:hover { background: #333840; }
+.settings-hit > div { display: grid; gap: 3px; min-width: 0; }
+.settings-hit strong { font-size: 13px; }
+.settings-hit span { color: #9aa3ad; font-size: 11px; }
+.settings-hit em { flex-shrink: 0; color: #79828c; font-size: 10px; font-style: normal; font-weight: 700; letter-spacing: .03em; }
+.amoled .settings-hit { border-bottom-color: #262626; }
+.amoled .settings-hit:hover { background: #232323; }
+
+.setting-row.is-highlighted { animation: setting-flash 2.4s ease-out; }
+@keyframes setting-flash { 0%, 62% { background: #3a4048; } 100% { background: transparent; } }
+
+.setting-text-field { display: flex; align-items: center; gap: 7px; }
+.setting-text-field input { width: 210px; padding: 9px 11px; border: 1px solid #3a4048; border-radius: 8px; color: #e3e6ea; background: #1e2229; font: inherit; font-size: 12px; }
+.setting-text-field input:focus { border-color: #4d5761; outline: 0; }
+.setting-text-field .icon-action { width: 30px; height: 30px; }
+.amoled .setting-text-field input { border-color: #262626; background: #181818; }
+
+.setting-color-field { display: flex; align-items: center; gap: 10px; }
+.setting-color-field input[type="color"] { width: 40px; height: 30px; padding: 0; border: 1px solid #3a4048; border-radius: 7px; background: none; cursor: pointer; }
+.setting-color-field input[type="range"] { width: 96px; accent-color: #b6bdc6; }
+.setting-color-field output { min-width: 36px; color: #9aa3ad; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }

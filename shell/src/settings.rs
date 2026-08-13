@@ -34,6 +34,38 @@ pub struct SettingsSnapshot {
     pub next_episode_threshold_mode: String,
     pub next_episode_threshold_percent: f64,
     pub next_episode_threshold_minutes: f64,
+    // Subtitle appearance
+    pub subtitle_text_color: String,
+    pub subtitle_background_color: String,
+    pub subtitle_outline_color: String,
+    pub subtitle_outline_width: i64,
+    pub subtitle_bottom_offset: i64,
+    pub subtitle_forced_only: bool,
+    pub subtitle_preferred_languages_only: bool,
+    pub secondary_audio_language: String,
+    pub secondary_subtitle_language: String,
+    pub addon_subtitle_startup_mode: String,
+    pub use_libass: bool,
+    // Autoplay / next episode
+    pub autoplay_source: String,
+    pub autoplay_regex: String,
+    pub autoplay_timeout_seconds: i64,
+    pub autoplay_prefer_binge_group: bool,
+    pub autoplay_reuse_binge_group: bool,
+    pub autoplay_next_episode_fallback: bool,
+    // Skip segments
+    pub anime_skip_enabled: bool,
+    pub anime_skip_client_id: String,
+    pub intro_db_api_key: String,
+    pub intro_submit_enabled: bool,
+    // Gestures (Nuvio syncs these; they are not client-only)
+    pub hold_to_speed: bool,
+    pub hold_to_speed_value: f64,
+    // External player
+    pub external_player_enabled: bool,
+    pub external_player_id: String,
+    pub external_player_forward_subtitles: bool,
+    pub external_player_send_skip_segments: bool,
 }
 
 /// Nuvio stores poster card style as a JSON *string* inside the settings blob
@@ -148,6 +180,11 @@ fn set_poster_style(blob: &mut Value, key: &str, value: Value) -> Result<()> {
         Value::String(serde_json::to_string(&Value::Object(style))?),
     );
     Ok(())
+}
+
+fn is_argb_hex(value: &str) -> bool {
+    let body = value.strip_prefix('#').unwrap_or(value);
+    matches!(body.len(), 6 | 8) && body.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn bail_unless(condition: bool, message: &'static str) -> Result<()> {
@@ -360,6 +397,62 @@ fn snapshot(blob: &Value) -> SettingsSnapshot {
             "next_episode_threshold_minutes_before_end_v2",
         )
         .unwrap_or(2.0),
+        subtitle_text_color: player_string(blob, "subtitle_text_color", "#FFFFFFFF"),
+        subtitle_background_color: player_string(blob, "subtitle_background_color", "#00000000"),
+        subtitle_outline_color: player_string(blob, "subtitle_outline_color", "#FF000000"),
+        subtitle_outline_width: player_int(blob, "subtitle_outline_width", 2),
+        subtitle_bottom_offset: player_int(blob, "subtitle_bottom_offset", 20),
+        subtitle_forced_only: player_bool(blob, "subtitle_use_forced_subtitles", false),
+        subtitle_preferred_languages_only: player_bool(
+            blob,
+            "subtitle_show_only_preferred_languages",
+            false,
+        ),
+        secondary_audio_language: player_string(blob, "secondary_preferred_audio_language", ""),
+        secondary_subtitle_language: player_string(
+            blob,
+            "secondary_preferred_subtitle_language",
+            "",
+        ),
+        addon_subtitle_startup_mode: player_string(
+            blob,
+            "addon_subtitle_startup_mode",
+            "ALL_SUBTITLES",
+        ),
+        use_libass: player_bool(blob, "use_libass", false),
+        autoplay_source: player_string(blob, "stream_auto_play_source", "ALL_SOURCES"),
+        autoplay_regex: player_string(blob, "stream_auto_play_regex", ""),
+        autoplay_timeout_seconds: player_int(blob, "stream_auto_play_timeout_seconds", 3),
+        autoplay_prefer_binge_group: player_bool(
+            blob,
+            "stream_auto_play_prefer_binge_group",
+            true,
+        ),
+        autoplay_reuse_binge_group: player_bool(blob, "stream_auto_play_reuse_binge_group", true),
+        autoplay_next_episode_fallback: player_bool(
+            blob,
+            "stream_auto_play_next_episode_fallback_enabled",
+            true,
+        ),
+        anime_skip_enabled: player_bool(blob, "anime_skip_enabled", false),
+        anime_skip_client_id: player_string(blob, "anime_skip_client_id", ""),
+        intro_db_api_key: player_string(blob, "intro_db_api_key", ""),
+        intro_submit_enabled: player_bool(blob, "intro_submit_enabled", false),
+        hold_to_speed: player_bool(blob, "hold_to_speed_enabled", true),
+        hold_to_speed_value: typed_f64(blob, "player_settings", "hold_to_speed_value")
+            .unwrap_or(2.0),
+        external_player_enabled: player_bool(blob, "external_player_enabled", false),
+        external_player_id: player_string(blob, "external_player_id", ""),
+        external_player_forward_subtitles: player_bool(
+            blob,
+            "external_player_forward_subtitles",
+            false,
+        ),
+        external_player_send_skip_segments: player_bool(
+            blob,
+            "external_player_send_skip_segments",
+            false,
+        ),
     }
 }
 
@@ -398,6 +491,81 @@ fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
             Kind::Boolean,
         ),
         "skipIntro" => ("player_settings", "skip_intro_enabled", Kind::Boolean),
+        "subtitleTextColor" => ("player_settings", "subtitle_text_color", Kind::String),
+        "subtitleBackgroundColor" => (
+            "player_settings",
+            "subtitle_background_color",
+            Kind::String,
+        ),
+        "subtitleOutlineColor" => ("player_settings", "subtitle_outline_color", Kind::String),
+        "subtitleOutlineWidth" => ("player_settings", "subtitle_outline_width", Kind::Int),
+        "subtitleBottomOffset" => ("player_settings", "subtitle_bottom_offset", Kind::Int),
+        "subtitleForcedOnly" => (
+            "player_settings",
+            "subtitle_use_forced_subtitles",
+            Kind::Boolean,
+        ),
+        "subtitlePreferredLanguagesOnly" => (
+            "player_settings",
+            "subtitle_show_only_preferred_languages",
+            Kind::Boolean,
+        ),
+        "secondaryAudioLanguage" => (
+            "player_settings",
+            "secondary_preferred_audio_language",
+            Kind::String,
+        ),
+        "secondarySubtitleLanguage" => (
+            "player_settings",
+            "secondary_preferred_subtitle_language",
+            Kind::String,
+        ),
+        "addonSubtitleStartupMode" => (
+            "player_settings",
+            "addon_subtitle_startup_mode",
+            Kind::String,
+        ),
+        "useLibass" => ("player_settings", "use_libass", Kind::Boolean),
+        "autoplaySource" => ("player_settings", "stream_auto_play_source", Kind::String),
+        "autoplayRegex" => ("player_settings", "stream_auto_play_regex", Kind::String),
+        "autoplayTimeoutSeconds" => (
+            "player_settings",
+            "stream_auto_play_timeout_seconds",
+            Kind::Int,
+        ),
+        "autoplayPreferBingeGroup" => (
+            "player_settings",
+            "stream_auto_play_prefer_binge_group",
+            Kind::Boolean,
+        ),
+        "autoplayReuseBingeGroup" => (
+            "player_settings",
+            "stream_auto_play_reuse_binge_group",
+            Kind::Boolean,
+        ),
+        "autoplayNextEpisodeFallback" => (
+            "player_settings",
+            "stream_auto_play_next_episode_fallback_enabled",
+            Kind::Boolean,
+        ),
+        "animeSkipEnabled" => ("player_settings", "anime_skip_enabled", Kind::Boolean),
+        "animeSkipClientId" => ("player_settings", "anime_skip_client_id", Kind::String),
+        "introDbApiKey" => ("player_settings", "intro_db_api_key", Kind::String),
+        "introSubmitEnabled" => ("player_settings", "intro_submit_enabled", Kind::Boolean),
+        "holdToSpeed" => ("player_settings", "hold_to_speed_enabled", Kind::Boolean),
+        "holdToSpeedValue" => ("player_settings", "hold_to_speed_value", Kind::Float),
+        "externalPlayerEnabled" => ("player_settings", "external_player_enabled", Kind::Boolean),
+        "externalPlayerId" => ("player_settings", "external_player_id", Kind::String),
+        "externalPlayerForwardSubtitles" => (
+            "player_settings",
+            "external_player_forward_subtitles",
+            Kind::Boolean,
+        ),
+        "externalPlayerSendSkipSegments" => (
+            "player_settings",
+            "external_player_send_skip_segments",
+            Kind::Boolean,
+        ),
         "nextEpisodeThresholdMode" => (
             "player_settings",
             "next_episode_threshold_mode",
@@ -467,6 +635,40 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
             bail!("link reuse window must be between 1 and 720 hours")
         }
         // Nuvio clamps these to the same ranges before use.
+        "subtitleOutlineWidth" if !(0..=8).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("outline width must be between 0 and 8")
+        }
+        "subtitleBottomOffset" if !(0..=200).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("subtitle offset must be between 0 and 200")
+        }
+        "autoplayTimeoutSeconds" if !(0..=30).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("autoplay timeout must be between 0 and 30 seconds")
+        }
+        "holdToSpeedValue" if !(1.25..=4.0).contains(&value.as_f64().unwrap_or_default()) => {
+            bail!("hold speed must be between 1.25x and 4x")
+        }
+        "autoplaySource"
+            if !matches!(
+                value.as_str(),
+                Some("ALL_SOURCES" | "ADDONS_ONLY" | "PLUGINS_ONLY" | "SELECTED")
+            ) =>
+        {
+            bail!("unsupported autoplay source")
+        }
+        "addonSubtitleStartupMode"
+            if !matches!(
+                value.as_str(),
+                Some("ALL_SUBTITLES" | "PREFERRED_ONLY" | "NONE")
+            ) =>
+        {
+            bail!("unsupported subtitle startup mode")
+        }
+        // Colours ride as #AARRGGBB strings, matching Nuvio's storage format.
+        "subtitleTextColor" | "subtitleBackgroundColor" | "subtitleOutlineColor"
+            if !is_argb_hex(value.as_str().unwrap_or_default()) =>
+        {
+            bail!("colour must be #AARRGGBB")
+        }
         "nextEpisodeThresholdMode"
             if !matches!(value.as_str(), Some("PERCENTAGE" | "MINUTES_BEFORE_END")) =>
         {
@@ -544,6 +746,15 @@ fn typed_string(blob: &Value, feature: &str, key: &str) -> Option<String> {
 fn typed_i64(blob: &Value, feature: &str, key: &str) -> Option<i64> {
     typed_value(blob, feature, key, "int")?.as_i64()
 }
+fn player_string(blob: &Value, key: &str, fallback: &str) -> String {
+    typed_string(blob, "player_settings", key).unwrap_or_else(|| fallback.to_string())
+}
+fn player_bool(blob: &Value, key: &str, fallback: bool) -> bool {
+    typed_bool(blob, "player_settings", key).unwrap_or(fallback)
+}
+fn player_int(blob: &Value, key: &str, fallback: i64) -> i64 {
+    typed_i64(blob, "player_settings", key).unwrap_or(fallback)
+}
 fn typed_f64(blob: &Value, feature: &str, key: &str) -> Option<f64> {
     typed_value(blob, feature, key, "float")?.as_f64()
 }
@@ -554,6 +765,46 @@ fn empty_blob() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_player_settings_round_trip_and_validate() {
+        let mut blob = json!({ "version": 3, "features": {} });
+        for (key, value) in [
+            ("subtitleOutlineWidth", json!(3)),
+            ("autoplayTimeoutSeconds", json!(5)),
+            ("holdToSpeedValue", json!(2.5)),
+            ("subtitleTextColor", json!("#FFEEDDCC")),
+            ("autoplaySource", json!("ADDONS_ONLY")),
+        ] {
+            let (feature, storage_key, kind) = setting_path(key).expect(key);
+            let normalized = validate_value(key, value, kind).expect(key);
+            set_typed_preference(&mut blob, feature, storage_key, kind, normalized).unwrap();
+        }
+        let snapshot = snapshot(&blob);
+        assert_eq!(snapshot.subtitle_outline_width, 3);
+        assert_eq!(snapshot.autoplay_timeout_seconds, 5);
+        assert_eq!(snapshot.hold_to_speed_value, 2.5);
+        assert_eq!(snapshot.subtitle_text_color, "#FFEEDDCC");
+        assert_eq!(snapshot.autoplay_source, "ADDONS_ONLY");
+        // Defaults must match Nuvio's, not zero.
+        assert!(snapshot.hold_to_speed);
+        assert_eq!(snapshot.subtitle_bottom_offset, 20);
+        assert_eq!(snapshot.addon_subtitle_startup_mode, "ALL_SUBTITLES");
+    }
+
+    #[test]
+    fn player_settings_reject_out_of_range_values() {
+        for (key, value) in [
+            ("subtitleOutlineWidth", json!(99)),
+            ("autoplayTimeoutSeconds", json!(-1)),
+            ("holdToSpeedValue", json!(10.0)),
+            ("subtitleTextColor", json!("red")),
+            ("autoplaySource", json!("WHATEVER")),
+        ] {
+            let (_, _, kind) = setting_path(key).expect(key);
+            assert!(validate_value(key, value, kind).is_err(), "{key} should be rejected");
+        }
+    }
 
     #[test]
     fn poster_writes_preserve_hover_preview_settings() {

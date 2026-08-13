@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type {
   AvailableCollectionCatalog,
@@ -10,102 +10,22 @@ import type {
 import { CollectionSettingsSection } from "./CollectionsPage";
 import { HomeLayoutSection } from "./HomeLayoutPage";
 import { Icon } from "./Icon";
-import { POSTER_RADII, POSTER_WIDTHS } from "../data/posterSize";
 import { setClientSetting, useClientSettings } from "../data/clientSettings";
+import type { ClientSettings } from "../data/clientSettings";
+import {
+  SECTIONS,
+  searchSettings,
+  type SettingDef,
+  type SettingScope,
+} from "../data/settingsRegistry";
 
-const categories = [
-  {
-    id: "home",
-    label: "Home Layout",
-    icon: "home",
-    scope: "account",
-    subtitle: "Choose which rows appear on Home, and in what order.",
-  },
-  {
-    id: "collections",
-    label: "Collections",
-    icon: "collections",
-    scope: "account",
-    subtitle: "Collections and folders synced from your Nuvio account.",
-  },
-  {
-    id: "appearance",
-    label: "Appearance",
-    icon: "settings",
-    scope: "device",
-    subtitle: "How the desktop client looks.",
-  },
-  {
-    id: "playback",
-    label: "Playback",
-    icon: "play",
-    scope: "device",
-    subtitle: "Player behavior and native playback defaults.",
-  },
-  {
-    id: "audio",
-    label: "Audio & Subtitles",
-    icon: "subtitles",
-    scope: "device",
-    subtitle: "Language selection and subtitle rendering.",
-  },
-  {
-    id: "client",
-    label: "This Client",
-    icon: "settings",
-    scope: "local",
-    subtitle: "Behaviour that only exists in this desktop client.",
-  },
-  {
-    id: "streams",
-    label: "Streams & Alerts",
-    icon: "info",
-    scope: "device",
-    subtitle: "Source presentation and episode notifications.",
-  },
-] as const;
-
-type CategoryId = (typeof categories)[number]["id"];
-
-/**
- * Only two Nuvio sync surfaces are platform-scoped: the profile settings blob
- * (desktop vs mobile rows) and, deliberately shared, the home catalog layout.
- * Everything the settings blob holds therefore stops at this desktop, which is
- * worth stating plainly rather than implying it reaches the phone.
- */
-const SCOPE_NOTE = {
+const SCOPE_NOTE: Record<SettingScope, string> = {
   account: "Shared with every device on this profile — phone, TV and desktop.",
   device:
     "Stored per platform. Nuvio keeps separate desktop and mobile settings, so these do not reach your phone or TV.",
-  // Not in the profile blob at all — Nuvio has no field for these.
   local:
     "Not synced anywhere. These exist only in this client and are stored on this machine.",
-} as const;
-
-const HOLD_SPEEDS = [
-  ["1.5x", 1.5],
-  ["2x", 2],
-  ["3x", 3],
-  ["4x", 4],
-] as const;
-
-/** Nuvio defaults this window to 24 hours (`streamReuseLastLinkCacheHours`). */
-const REUSE_WINDOWS = [
-  ["1 hour", 1],
-  ["6 hours", 6],
-  ["24 hours", 24],
-  ["3 days", 72],
-  ["7 days", 168],
-] as const;
-
-/** Shared language options for both audio and subtitle selection. */
-const LANGUAGES: [string, string][] = [
-  ["en", "English"],
-  ["es", "Spanish"],
-  ["fr", "French"],
-  ["de", "German"],
-  ["ja", "Japanese"],
-];
+};
 
 export function SettingsPage({
   profileIndex,
@@ -150,8 +70,11 @@ export function SettingsPage({
   const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [category, setCategory] = useState<CategoryId>("home");
-  const clientSettings = useClientSettings();
+  const [sectionId, setSectionId] = useState<string>(SECTIONS[0].id);
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const client = useClientSettings();
+  const paneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSettings(null);
@@ -163,83 +86,173 @@ export function SettingsPage({
       })
       .catch((reason: Error) => setError(reason.message));
   }, [profileIndex]);
-  async function update<K extends keyof SettingsSnapshot>(
-    key: K,
-    value: SettingsSnapshot[K],
-  ) {
+
+  // Highlighting is a one-shot cue after jumping from a search result, so it
+  // clears itself rather than leaving a row marked while you work.
+  useEffect(() => {
+    if (!highlight) return;
+    paneRef.current
+      ?.querySelector(`[data-setting="${highlight}"]`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const timer = window.setTimeout(() => setHighlight(null), 2400);
+    return () => window.clearTimeout(timer);
+  }, [highlight, sectionId]);
+
+  const hits = useMemo(() => searchSettings(query), [query]);
+
+  async function updateSynced(key: string, value: unknown) {
     setBusyKey(key);
     setError(null);
     try {
-      const next = await invoke<SettingsSnapshot>("settings.update", {
-        key,
-        value,
-      });
+      const next = await invoke<SettingsSnapshot>("settings.update", { key, value });
       setSettings(next);
       onSettingsChange?.(next);
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Setting update failed",
-      );
+      setError(reason instanceof Error ? reason.message : "Setting update failed");
     } finally {
       setBusyKey(null);
     }
   }
+
   if (!settings)
     return (
       <div className="settings-page">
         <div className="feature-title">
           <div>
-            <span>SYNCED PROFILE</span>
             <h1>Settings</h1>
-            <p>{error || "Loading Nuvio desktop settings…"}</p>
+            <p>{error || "Loading settings…"}</p>
           </div>
         </div>
       </div>
     );
 
-  const busy = !!busyKey;
-  const active = categories.find((item) => item.id === category) ?? categories[0];
+  const section = SECTIONS.find((item) => item.id === sectionId) ?? SECTIONS[0];
+
+  const readValue = (setting: SettingDef, scope: SettingScope): unknown =>
+    scope === "local"
+      ? client[setting.id as keyof ClientSettings]
+      : settings[setting.id as keyof SettingsSnapshot];
+
+  const isVisible = (setting: SettingDef, scope: SettingScope) => {
+    if (!setting.requires) return true;
+    return scope === "local"
+      ? !!client[setting.requires as keyof ClientSettings]
+      : !!settings[setting.requires as keyof SettingsSnapshot];
+  };
+
+  const commit = (setting: SettingDef, scope: SettingScope, value: unknown) => {
+    if (scope === "local") {
+      setClientSetting(setting.id as keyof ClientSettings, value as never);
+      return;
+    }
+    void updateSynced(String(setting.id), value);
+  };
 
   return (
     <div className="settings-page">
       <div className="feature-title">
         <div>
-          <span>{active.scope === "account" ? "SYNCED PROFILE" : "THIS DESKTOP"}</span>
           <h1>Settings</h1>
-          <p>{active.subtitle}</p>
-          <p className={`scope-note scope-${active.scope}`}>{SCOPE_NOTE[active.scope]}</p>
+          <p>{section.subtitle}</p>
+          <p className={`scope-note scope-${section.scope}`}>
+            {SCOPE_NOTE[section.scope]}
+          </p>
         </div>
       </div>
       {error && <div className="inline-error settings-error">{error}</div>}
+
       <div className="settings-shell">
-        <nav className="settings-nav" aria-label="Settings categories">
-          {categories.map((item) => (
-            <button
-              key={item.id}
-              className={item.id === active.id ? "active" : undefined}
-              aria-current={item.id === active.id}
-              onClick={() => setCategory(item.id)}
-            >
-              <Icon name={item.icon} size={18} />
-              {item.label}
-              {item.scope === "device" && (
-                <i
-                  className="scope-dot"
-                  title="Desktop only — not shared with your phone or TV"
-                />
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="settings-pane">
-          {active.id === "home" && (
+        <div className="settings-side">
+          <label className="settings-search">
+            <Icon name="search" size={17} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search settings…"
+              aria-label="Search settings"
+            />
+            {query && (
+              <button
+                className="search-clear"
+                title="Clear"
+                aria-label="Clear search"
+                onClick={() => setQuery("")}
+              >
+                <Icon name="close" size={15} />
+              </button>
+            )}
+          </label>
+          <nav className="settings-nav" aria-label="Settings sections">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                className={item.id === section.id && !query ? "active" : undefined}
+                aria-current={item.id === section.id}
+                onClick={() => {
+                  setQuery("");
+                  setSectionId(item.id);
+                }}
+              >
+                <Icon name={item.icon as never} size={18} />
+                {item.label}
+                {item.scope !== "account" && (
+                  <i
+                    className="scope-dot"
+                    title={
+                      item.scope === "local"
+                        ? "Not synced — this machine only"
+                        : "Desktop only — not shared with your phone or TV"
+                    }
+                  />
+                )}
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <div className="settings-pane" ref={paneRef}>
+          {query ? (
+            <section className="settings-group">
+              <div>
+                <h2>
+                  {hits.length} result{hits.length === 1 ? "" : "s"}
+                </h2>
+                <p>Matching settings across every section.</p>
+              </div>
+              <div className="settings-list">
+                {hits.length === 0 ? (
+                  <div className="collection-settings-empty">
+                    Nothing matches “{query}”.
+                  </div>
+                ) : (
+                  hits.map(({ section: hitSection, group, setting }) => (
+                    <button
+                      className="settings-hit"
+                      key={`${hitSection.id}:${String(setting.id)}`}
+                      onClick={() => {
+                        setQuery("");
+                        setSectionId(hitSection.id);
+                        setHighlight(String(setting.id));
+                      }}
+                    >
+                      <div>
+                        <strong>{setting.label}</strong>
+                        {setting.detail && <span>{setting.detail}</span>}
+                      </div>
+                      <em>
+                        {hitSection.label} › {group.title}
+                      </em>
+                    </button>
+                  ))
+                )}
+              </div>
+            </section>
+          ) : section.custom === "homeLayout" ? (
             <HomeLayoutSection
               profileIndex={profileIndex}
               onChanged={onHomeLayoutChanged}
             />
-          )}
-
-          {active.id === "collections" && (
+          ) : section.custom === "collections" ? (
             <CollectionSettingsSection
               collections={collections}
               availableCatalogs={availableCatalogs}
@@ -251,302 +264,29 @@ export function SettingsPage({
               onReorderCatalog={onReorderCatalog}
               onFolder={onOpenFolder}
             />
-          )}
-
-          {active.id === "appearance" && (
-            <>
-              <SettingsGroup
-                title="Theme"
-                subtitle="A neutral gray interface with an optional true-black canvas."
-              >
-                <SwitchSetting
-                  label="AMOLED black"
-                  detail="Use pure black surfaces for OLED displays"
-                  value={settings.amoledEnabled}
-                  disabled={busy}
-                  onChange={(value) => update("amoledEnabled", value)}
-                />
-              </SettingsGroup>
-              <SettingsGroup
-                title="Poster card style"
-                subtitle="Card width and corner radius, matching Nuvio's presets."
-              >
-                <PresetSetting
-                  label="Width"
-                  detail="Height follows at a 2:3 ratio"
-                  value={settings.posterWidth}
-                  options={POSTER_WIDTHS}
-                  disabled={busy}
-                  onChange={(value) => update("posterWidth", value)}
-                />
-                <PresetSetting
-                  label="Corner radius"
-                  detail="Roundness of poster artwork"
-                  value={settings.posterCornerRadius}
-                  options={POSTER_RADII}
-                  disabled={busy}
-                  onChange={(value) => update("posterCornerRadius", value)}
-                />
-                <SwitchSetting
-                  label="Hide labels"
-                  detail="Drop the title and year beneath each poster"
-                  value={settings.posterHideLabels}
-                  disabled={busy}
-                  onChange={(value) => update("posterHideLabels", value)}
-                />
-                <SwitchSetting
-                  label="Landscape posters"
-                  detail="Use wide artwork in the full catalog view"
-                  value={settings.posterLandscapeCatalogs}
-                  disabled={busy}
-                  onChange={(value) => update("posterLandscapeCatalogs", value)}
-                />
-              </SettingsGroup>
-            </>
-          )}
-
-          {active.id === "playback" && (
-            <>
-              <SettingsGroup
-                title="Player"
-                subtitle="How video is framed and what the player shows while it works."
-              >
-                <SelectSetting
-                  label="Video sizing"
-                  detail="How video fills the window"
-                  value={settings.resizeMode}
-                  disabled={busy}
-                  options={[
-                    ["Fit", "Fit — letterbox to preserve aspect"],
-                    ["Fill", "Fill — crop to fill the window"],
-                    ["Zoom", "Zoom — enlarge past the edges"],
-                    ["Stretch", "Stretch — ignore aspect ratio"],
-                  ]}
-                  onChange={(value) =>
-                    update("resizeMode", value as SettingsSnapshot["resizeMode"])
-                  }
-                />
-                <SwitchSetting
-                  label="Loading overlay"
-                  detail="Show status while opening a stream"
-                  value={settings.showLoadingOverlay}
-                  disabled={busy}
-                  onChange={(value) => update("showLoadingOverlay", value)}
-                />
-                <SwitchSetting
-                  label="Parental guide"
-                  detail="Show content advisories where available"
-                  value={settings.showParentalGuide}
-                  disabled={busy}
-                  onChange={(value) => update("showParentalGuide", value)}
-                />
-                <SwitchSetting
-                  label="Skip intros"
-                  detail="Enable supported intro-skip providers"
-                  value={settings.skipIntro}
-                  disabled={busy}
-                  onChange={(value) => update("skipIntro", value)}
-                />
-                <SwitchSetting
-                  label="RTX video enhancement"
-                  detail="Enable NVIDIA RTX super resolution for libmpv"
-                  value={settings.rtxSuperResolution}
-                  disabled={busy}
-                  onChange={(value) => update("rtxSuperResolution", value)}
-                />
-              </SettingsGroup>
-              <SettingsGroup
-                title="Autoplay"
-                subtitle="How Nuvio picks a source and moves to the next episode."
-              >
-                <SelectSetting
-                  label="Source selection"
-                  detail="What happens when you press play"
-                  value={settings.autoplayMode}
-                  disabled={busy}
-                  options={[
-                    ["MANUAL", "Manual — always show the source list"],
-                    ["FIRST_STREAM", "First stream — play the top result"],
-                    ["REGEX_MATCH", "Pattern match — play the first match"],
-                  ]}
-                  onChange={(value) =>
-                    update(
-                      "autoplayMode",
-                      value as SettingsSnapshot["autoplayMode"],
-                    )
-                  }
-                />
-                <SwitchSetting
-                  label="Next episode"
-                  detail="Automatically start the next episode"
-                  value={settings.autoplayNextEpisode}
-                  disabled={busy}
-                  onChange={(value) => update("autoplayNextEpisode", value)}
-                />
-                <SwitchSetting
-                  label="Reuse last stream"
-                  detail="Skip the source list and replay the link you last used"
-                  value={settings.reuseLastStream}
-                  disabled={busy}
-                  onChange={(value) => update("reuseLastStream", value)}
-                />
-                {settings.reuseLastStream && (
-                  <PresetSetting
-                    label="Keep links for"
-                    detail="Links with an expiry in the URL are never reused"
-                    value={settings.reuseLastStreamHours}
-                    options={REUSE_WINDOWS}
-                    disabled={busy}
-                    onChange={(value) => update("reuseLastStreamHours", value)}
-                  />
-                )}
-              </SettingsGroup>
-            </>
-          )}
-
-          {active.id === "audio" && (
-            <>
-              <SettingsGroup
-                title="Languages"
-                subtitle="Preferred tracks to select when a stream opens."
-              >
-                <SelectSetting
-                  label="Preferred audio"
-                  value={settings.preferredAudioLanguage}
-                  disabled={busy}
-                  options={[
-                    ["device", "Match device language"],
-                    ["default", "Stream default"],
-                    ["original", "Original language"],
-                    ...LANGUAGES,
-                  ]}
-                  onChange={(value) => update("preferredAudioLanguage", value)}
-                />
-                <SelectSetting
-                  label="Preferred subtitles"
-                  value={settings.preferredSubtitleLanguage}
-                  disabled={busy}
-                  options={[
-                    ["none", "Off"],
-                    ["device", "Match device language"],
-                    ["forced", "Forced subtitles only"],
-                    ...LANGUAGES,
-                  ]}
-                  onChange={(value) =>
-                    update("preferredSubtitleLanguage", value)
-                  }
-                />
-              </SettingsGroup>
-              <SettingsGroup
-                title="Subtitle appearance"
-                subtitle="How subtitles are drawn over video."
-              >
-                <NumberSetting
-                  label="Subtitle size"
-                  value={settings.subtitleFontSize}
-                  disabled={busy}
-                  onChange={(value) => update("subtitleFontSize", value)}
-                />
-                <SwitchSetting
-                  label="Bold subtitles"
-                  detail="Use heavier subtitle text"
-                  value={settings.subtitleBold}
-                  disabled={busy}
-                  onChange={(value) => update("subtitleBold", value)}
-                />
-                <SwitchSetting
-                  label="Subtitle outline"
-                  detail="Improve readability against bright video"
-                  value={settings.subtitleOutline}
-                  disabled={busy}
-                  onChange={(value) => update("subtitleOutline", value)}
-                />
-              </SettingsGroup>
-            </>
-          )}
-
-          {active.id === "client" && (
-            <SettingsGroup
-              title="Player gestures"
-              subtitle="Mouse shortcuts on the video surface. Nuvio has no equivalent for these, so they are stored here only."
-            >
-              <SwitchSetting
-                label="Click to pause"
-                detail="Left click the video to pause or resume"
-                value={clientSettings.clickToPause}
-                disabled={false}
-                onChange={(value) => setClientSetting("clickToPause", value)}
-              />
-              <SwitchSetting
-                label="Hold to fast-forward"
-                detail="Hold right click to speed up while pressed"
-                value={clientSettings.holdToSpeed}
-                disabled={false}
-                onChange={(value) => setClientSetting("holdToSpeed", value)}
-              />
-              <SwitchSetting
-                label="Seek bar thumbnails"
-                detail="Decode a preview frame when hovering the timeline. Opens a second connection to the source."
-                value={clientSettings.seekThumbnails}
-                disabled={false}
-                onChange={(value) => setClientSetting("seekThumbnails", value)}
-              />
-              {clientSettings.holdToSpeed && (
-                <PresetSetting
-                  label="Hold speed"
-                  detail="Playback rate while right click is held"
-                  value={clientSettings.holdSpeed}
-                  options={HOLD_SPEEDS}
-                  disabled={false}
-                  onChange={(value) => setClientSetting("holdSpeed", value)}
-                />
-              )}
-            </SettingsGroup>
-          )}
-
-          {active.id === "streams" && (
-            <>
-              <SettingsGroup
-                title="Source list"
-                subtitle="What each stream shows in the source picker."
-              >
-                <SwitchSetting
-                  label="File-size badges"
-                  detail="Show known stream file sizes"
-                  value={settings.showFileSizeBadges}
-                  disabled={busy}
-                  onChange={(value) => update("showFileSizeBadges", value)}
-                />
-                <SelectSetting
-                  label="Badge placement"
-                  detail="Where badges sit on a source row"
-                  value={settings.badgePlacement}
-                  disabled={busy}
-                  options={[
-                    ["TOP", "Above the title"],
-                    ["BOTTOM", "Below the title"],
-                  ]}
-                  onChange={(value) =>
-                    update(
-                      "badgePlacement",
-                      value as SettingsSnapshot["badgePlacement"],
-                    )
-                  }
-                />
-              </SettingsGroup>
-              <SettingsGroup
-                title="Notifications"
-                subtitle="Alerts for series you follow."
-              >
-                <SwitchSetting
-                  label="Episode release alerts"
-                  detail="Enable release notifications for followed series"
-                  value={settings.episodeReleaseAlerts}
-                  disabled={busy}
-                  onChange={(value) => update("episodeReleaseAlerts", value)}
-                />
-              </SettingsGroup>
-            </>
+          ) : (
+            section.groups.map((group) => (
+              <section className="settings-group" key={group.title}>
+                <div>
+                  <h2>{group.title}</h2>
+                  <p>{group.subtitle}</p>
+                </div>
+                <div className="settings-list">
+                  {group.settings
+                    .filter((setting) => isVisible(setting, section.scope))
+                    .map((setting) => (
+                      <SettingRow
+                        key={String(setting.id)}
+                        setting={setting}
+                        value={readValue(setting, section.scope)}
+                        busy={!!busyKey}
+                        highlighted={highlight === String(setting.id)}
+                        onChange={(value) => commit(setting, section.scope, value)}
+                      />
+                    ))}
+                </div>
+              </section>
+            ))
           )}
         </div>
       </div>
@@ -554,164 +294,190 @@ export function SettingsPage({
   );
 }
 
-/** Named presets shown as chips, mirroring Nuvio's poster customization page.
- *  A value that matches no preset reads as "Custom", exactly as Nuvio does. */
-function PresetSetting({
-  label,
-  detail,
+function SettingRow({
+  setting,
   value,
-  options,
-  disabled,
+  busy,
+  highlighted,
   onChange,
 }: {
-  label: string;
-  detail: string;
-  value: number;
-  options: readonly (readonly [string, number])[];
-  disabled: boolean;
-  onChange(value: number): void;
+  setting: SettingDef;
+  value: unknown;
+  busy: boolean;
+  highlighted: boolean;
+  onChange(value: unknown): void;
 }) {
-  const matched = options.some(([, preset]) => preset === value);
+  const control = setting.control;
   return (
-    <div className="setting-row preset-row">
+    <div
+      className={highlighted ? "setting-row is-highlighted" : "setting-row"}
+      data-setting={String(setting.id)}
+    >
       <div>
-        <strong>{label}</strong>
-        <span>
-          {detail}
-          {matched ? "" : ` · Custom (${value})`}
-        </span>
+        <strong>{setting.label}</strong>
+        {setting.detail && <span>{setting.detail}</span>}
       </div>
-      <div className="preset-chips">
-        {options.map(([text, preset]) => (
-          <button
-            key={preset}
-            className={preset === value ? "active" : undefined}
-            title={`${text} — ${preset}dp`}
-            aria-pressed={preset === value}
-            disabled={disabled}
-            onClick={() => onChange(preset)}
-          >
-            {text}
-          </button>
-        ))}
-      </div>
+
+      {control.kind === "switch" && (
+        <label className="switch">
+          <input
+            type="checkbox"
+            aria-label={setting.label}
+            checked={!!value}
+            disabled={busy}
+            onChange={(event) => onChange(event.target.checked)}
+          />
+          <i />
+        </label>
+      )}
+
+      {control.kind === "preset" && (
+        <div className="preset-chips">
+          {control.options.map(([label, option]) => (
+            <button
+              key={String(option)}
+              className={option === value ? "active" : undefined}
+              aria-pressed={option === value}
+              disabled={busy}
+              onClick={() => onChange(option)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {control.kind === "number" && (
+        <div className="poster-size-control">
+          <input
+            type="range"
+            aria-label={setting.label}
+            min={control.min}
+            max={control.max}
+            step={control.step ?? 1}
+            value={Number(value) || control.min}
+            disabled={busy}
+            onChange={(event) => onChange(Number(event.target.value))}
+          />
+          <output>
+            {Number(value) || control.min}
+            {control.suffix ?? ""}
+          </output>
+        </div>
+      )}
+
+      {control.kind === "text" && (
+        <SettingTextField
+          value={String(value ?? "")}
+          placeholder={control.placeholder}
+          secret={control.secret}
+          disabled={busy}
+          onCommit={onChange}
+        />
+      )}
+
+      {control.kind === "color" && (
+        <ColorField
+          value={String(value ?? "#FFFFFFFF")}
+          disabled={busy}
+          onCommit={onChange}
+        />
+      )}
     </div>
   );
 }
 
-function SettingsGroup({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="settings-group">
-      <div>
-        <h2>{title}</h2>
-        <p>{subtitle}</p>
-      </div>
-      <div className="settings-list">{children}</div>
-    </section>
-  );
-}
-function SwitchSetting({
-  label,
-  detail,
+/** Commits on blur or Enter, so a key or pattern is not pushed per keystroke. */
+function SettingTextField({
   value,
+  placeholder,
+  secret,
   disabled,
-  onChange,
+  onCommit,
 }: {
-  label: string;
-  detail: string;
-  value: boolean;
-  disabled: boolean;
-  onChange(value: boolean): void;
-}) {
-  return (
-    <label className="setting-row">
-      <div>
-        <strong>{label}</strong>
-        <span>{detail}</span>
-      </div>
-      <span className="switch">
-        <input
-          type="checkbox"
-          checked={value}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.checked)}
-        />
-        <i />
-      </span>
-    </label>
-  );
-}
-/** Options are `[storedValue, humanLabel]` — the stored half must stay exactly
- *  what Nuvio's settings blob expects. */
-function SelectSetting({
-  label,
-  detail,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  detail?: string;
   value: string;
-  options: readonly (readonly [string, string])[];
+  placeholder?: string;
+  secret?: boolean;
   disabled: boolean;
-  onChange(value: string): void;
+  onCommit(value: string): void;
 }) {
+  const [draft, setDraft] = useState(value);
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => setDraft(value), [value]);
   return (
-    <label className="setting-row">
-      <div>
-        <strong>{label}</strong>
-        {detail && <span>{detail}</span>}
-      </div>
-      <select
-        value={value}
+    <div className="setting-text-field">
+      <input
+        type={secret && !revealed ? "password" : "text"}
+        value={draft}
+        placeholder={placeholder}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {options.map(([option, text]) => (
-          <option key={option} value={option}>
-            {text}
-          </option>
-        ))}
-      </select>
-    </label>
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => draft !== value && onCommit(draft)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") setDraft(value);
+        }}
+      />
+      {secret && (
+        <button
+          type="button"
+          className="icon-action"
+          title={revealed ? "Hide" : "Reveal"}
+          aria-label={revealed ? "Hide" : "Reveal"}
+          onClick={() => setRevealed(!revealed)}
+        >
+          <Icon name="eye" size={16} />
+        </button>
+      )}
+    </div>
   );
 }
-function NumberSetting({
-  label,
+
+/**
+ * Nuvio stores subtitle colours as #AARRGGBB, but the native picker only
+ * speaks #RRGGBB — so alpha rides a separate slider and is recombined here.
+ */
+function ColorField({
   value,
   disabled,
-  onChange,
+  onCommit,
 }: {
-  label: string;
-  value: number;
+  value: string;
   disabled: boolean;
-  onChange(value: number): void;
+  onCommit(value: string): void;
 }) {
+  const body = value.replace("#", "");
+  const alpha = body.length === 8 ? body.slice(0, 2) : "FF";
+  const rgb = (body.length === 8 ? body.slice(2) : body).padEnd(6, "0").slice(0, 6);
+  const alphaPercent = Math.round((parseInt(alpha, 16) / 255) * 100);
+
   return (
-    <label className="setting-row">
-      <div>
-        <strong>{label}</strong>
-        <span>12–40 px</span>
-      </div>
+    <div className="setting-color-field">
       <input
-        className="number-input"
-        type="number"
-        min={12}
-        max={40}
-        value={value}
+        type="color"
+        aria-label="Colour"
+        value={`#${rgb}`}
         disabled={disabled}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onChange={(event) =>
+          onCommit(`#${alpha}${event.target.value.replace("#", "").toUpperCase()}`)
+        }
       />
-    </label>
+      <input
+        type="range"
+        aria-label="Opacity"
+        min={0}
+        max={100}
+        value={alphaPercent}
+        disabled={disabled}
+        onChange={(event) => {
+          const next = Math.round((Number(event.target.value) / 100) * 255)
+            .toString(16)
+            .padStart(2, "0")
+            .toUpperCase();
+          onCommit(`#${next}${rgb}`);
+        }}
+      />
+      <output>{alphaPercent}%</output>
+    </div>
   );
 }

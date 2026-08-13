@@ -11,17 +11,12 @@ import { useSyncExternalStore } from "react";
 export type ClientSettings = {
   /** Left click on the video toggles pause. */
   clickToPause: boolean;
-  /** Hold right click for temporary fast-forward. */
-  holdToSpeed: boolean;
-  holdSpeed: number;
   /** Decode a preview frame when hovering the seek bar. */
   seekThumbnails: boolean;
 };
 
 const DEFAULTS: ClientSettings = {
   clickToPause: true,
-  holdToSpeed: true,
-  holdSpeed: 2,
   seekThumbnails: false,
 };
 
@@ -35,19 +30,11 @@ function read(): ClientSettings {
     const stored = JSON.parse(raw) as Partial<ClientSettings>;
     return {
       clickToPause: stored.clickToPause ?? DEFAULTS.clickToPause,
-      holdToSpeed: stored.holdToSpeed ?? DEFAULTS.holdToSpeed,
-      holdSpeed: clampSpeed(stored.holdSpeed),
       seekThumbnails: stored.seekThumbnails ?? DEFAULTS.seekThumbnails,
     };
   } catch {
     return DEFAULTS;
   }
-}
-
-function clampSpeed(value: unknown): number {
-  const speed = Number(value);
-  if (!Number.isFinite(speed)) return DEFAULTS.holdSpeed;
-  return Math.min(Math.max(speed, 1.25), 4);
 }
 
 // useSyncExternalStore compares by reference, so the snapshot is only replaced
@@ -59,7 +46,6 @@ export function setClientSetting<K extends keyof ClientSettings>(
   value: ClientSettings[K],
 ) {
   const next = { ...snapshot, [key]: value };
-  if (key === "holdSpeed") next.holdSpeed = clampSpeed(value);
   if (next[key] === snapshot[key]) return;
   snapshot = next;
   try {

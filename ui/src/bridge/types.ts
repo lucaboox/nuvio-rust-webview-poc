@@ -369,4 +369,36 @@ export type SettingsSnapshot = {
   nextEpisodeThresholdMode: "PERCENTAGE" | "MINUTES_BEFORE_END";
   nextEpisodeThresholdPercent: number;
   nextEpisodeThresholdMinutes: number;
+  // Subtitle appearance
+  subtitleTextColor: string;
+  subtitleBackgroundColor: string;
+  subtitleOutlineColor: string;
+  subtitleOutlineWidth: number;
+  subtitleBottomOffset: number;
+  subtitleForcedOnly: boolean;
+  subtitlePreferredLanguagesOnly: boolean;
+  secondaryAudioLanguage: string;
+  secondarySubtitleLanguage: string;
+  addonSubtitleStartupMode: "ALL_SUBTITLES" | "PREFERRED_ONLY" | "NONE";
+  useLibass: boolean;
+  // Autoplay
+  autoplaySource: string;
+  autoplayRegex: string;
+  autoplayTimeoutSeconds: number;
+  autoplayPreferBingeGroup: boolean;
+  autoplayReuseBingeGroup: boolean;
+  autoplayNextEpisodeFallback: boolean;
+  // Skipping
+  animeSkipEnabled: boolean;
+  animeSkipClientId: string;
+  introDbApiKey: string;
+  introSubmitEnabled: boolean;
+  // Gestures (synced by Nuvio)
+  holdToSpeed: boolean;
+  holdToSpeedValue: number;
+  // External player
+  externalPlayerEnabled: boolean;
+  externalPlayerId: string;
+  externalPlayerForwardSubtitles: boolean;
+  externalPlayerSendSkipSegments: boolean;
 };

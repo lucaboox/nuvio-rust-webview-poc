@@ -14,7 +14,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
 };
 
-use super::{PlayerState, PlayerTrack};
+use super::{PlayerState, PlayerTrack, SubtitleStyle};
 
 #[derive(Clone, Debug)]
 pub enum PlayerCommand {
@@ -59,6 +59,7 @@ pub fn launch(
     url: String,
     request_headers: Vec<String>,
     start_position_ms: i64,
+    subtitle_style: SubtitleStyle,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
 ) -> Result<mpsc::Sender<PlayerCommand>> {
@@ -73,6 +74,7 @@ pub fn launch(
                 &url,
                 &request_headers,
                 start_position_ms,
+                &subtitle_style,
                 &state,
                 receiver,
                 on_progress,
@@ -110,6 +112,7 @@ fn run_player(
     source: &str,
     request_headers: &[String],
     start_position_ms: i64,
+    subtitle_style: &SubtitleStyle,
     state: &Arc<Mutex<PlayerState>>,
     receiver: mpsc::Receiver<PlayerCommand>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
@@ -192,6 +195,7 @@ fn run_player(
         )?;
         set_option(mpv_set_option_string, handle, "cache-secs", "36000")?;
         set_option(mpv_set_option_string, handle, "hr-seek", "no")?;
+        apply_subtitle_style(mpv_set_option_string, handle, subtitle_style)?;
         if !request_headers.is_empty() {
             set_option(
                 mpv_set_option_string,
@@ -395,6 +399,63 @@ fn run_player(
         }
         Ok(())
     }
+}
+
+/// mpv wants `#AARRGGBB` too, so the stored value passes through unchanged —
+/// only the alpha-less form needs padding.
+fn mpv_color(value: &str) -> String {
+    let body = value.trim_start_matches('#');
+    if body.len() == 6 {
+        format!("#FF{}", body.to_uppercase())
+    } else {
+        format!("#{}", body.to_uppercase())
+    }
+}
+
+unsafe fn apply_subtitle_style(
+    set: MpvSetOptionString,
+    handle: *mut c_void,
+    style: &SubtitleStyle,
+) -> Result<()> {
+    unsafe {
+        // `sub-ass-override=force` is what makes these apply to ASS/SSA tracks;
+        // without it styled subtitles ignore every option below.
+        set_option(
+            set,
+            handle,
+            "sub-ass-override",
+            if style.use_libass { "no" } else { "force" },
+        )?;
+        set_option(set, handle, "sub-font-size", &style.font_size.to_string())?;
+        set_option(set, handle, "sub-bold", if style.bold { "yes" } else { "no" })?;
+        set_option(set, handle, "sub-color", &mpv_color(&style.text_color))?;
+        set_option(
+            set,
+            handle,
+            "sub-back-color",
+            &mpv_color(&style.background_color),
+        )?;
+        set_option(
+            set,
+            handle,
+            "sub-border-size",
+            &if style.outline_enabled { style.outline_width } else { 0 }.to_string(),
+        )?;
+        set_option(
+            set,
+            handle,
+            "sub-border-color",
+            &mpv_color(&style.outline_color),
+        )?;
+        // mpv measures this in 0-100 units of window height from the bottom.
+        set_option(
+            set,
+            handle,
+            "sub-margin-y",
+            &style.bottom_offset.clamp(0, 200).to_string(),
+        )?;
+    }
+    Ok(())
 }
 
 /// libmpv error codes, so a failure reads as a cause rather than a number.

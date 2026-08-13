@@ -8,6 +8,38 @@ mod native;
 #[cfg(windows)]
 pub use native::find_mpv;
 
+/// Subtitle appearance pushed into mpv at load time. Kept separate from the
+/// settings snapshot so the player layer does not depend on the sync schema.
+#[derive(Clone, Debug)]
+pub struct SubtitleStyle {
+    pub font_size: i64,
+    pub bold: bool,
+    pub text_color: String,
+    pub background_color: String,
+    pub outline_enabled: bool,
+    pub outline_color: String,
+    pub outline_width: i64,
+    pub bottom_offset: i64,
+    pub use_libass: bool,
+}
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        // Matches Nuvio's SubtitleStyleState.DEFAULT.
+        Self {
+            font_size: 18,
+            bold: false,
+            text_color: "#FFFFFFFF".to_string(),
+            background_color: "#00000000".to_string(),
+            outline_enabled: true,
+            outline_color: "#FF000000".to_string(),
+            outline_width: 2,
+            bottom_offset: 20,
+            use_libass: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerState {
@@ -97,6 +129,7 @@ impl PlayerService {
         url: Option<String>,
         request_headers: Vec<String>,
         start_position_ms: i64,
+        subtitle_style: SubtitleStyle,
         on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
         let url = url.filter(|value| value.starts_with("http://") || value.starts_with("https://"))
@@ -121,6 +154,7 @@ impl PlayerService {
                 url,
                 request_headers,
                 start_position_ms,
+                subtitle_style,
                 Arc::clone(&self.state),
                 on_progress,
             )?);
@@ -185,24 +219,6 @@ impl PlayerService {
         self.source.clone()
     }
 
-    /// Decodes a preview frame for the stream currently loaded.
-    pub fn thumbnail(&self, position_ms: i64) -> anyhow::Result<Vec<u8>> {
-        #[cfg(windows)]
-        {
-            let (url, headers) = self
-                .source
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("nothing is playing"))?;
-            let dll = native::find_mpv()
-                .ok_or_else(|| anyhow::anyhow!("libmpv-2.dll was not found"))?;
-            return crate::thumbnail::capture(&dll, url, headers, position_ms);
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = position_ms;
-            anyhow::bail!("thumbnails are implemented for Windows only")
-        }
-    }
 
     pub fn set_speed(&self, speed: f64) -> anyhow::Result<()> {
         self.send(native::PlayerCommand::SetSpeed(speed.clamp(0.25, 4.0)))
