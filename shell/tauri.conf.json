@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nuvio",
+  "version": "0.1.0",
+  "identifier": "com.nuvio.desktop.poc",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": {
+      "cwd": "..",
+      "script": "npm run build:ui"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nuvio · Rust architecture POC",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 840,
+        "minHeight": 600,
+        "resizable": true,
+        "transparent": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["assets/Nuvio-icon.png", "assets/nuvio.ico"]
+  }
+}

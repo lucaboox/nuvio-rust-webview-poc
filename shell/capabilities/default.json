@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Nuvio's own commands are not ACL-gated; this only grants the core defaults the webview needs to boot.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -9,6 +9,8 @@
     "dev:ui": "vite",
     "build": "npm run build:ui && cargo build --manifest-path shell/Cargo.toml",
     "dev": "npm run build:ui && cargo run --manifest-path shell/Cargo.toml",
+    "tauri": "tauri",
+    "bundle": "tauri build --config shell/tauri.conf.json",
     "test:shell": "cargo test --manifest-path shell/Cargo.toml"
   },
   "dependencies": {

@@ -39,18 +39,6 @@ pub enum OutboundMessage {
     Event(EventEnvelope),
 }
 
-impl OutboundMessage {
-    pub fn to_script(&self) -> Result<String, serde_json::Error> {
-        let payload = match self {
-            Self::Response(response) => serde_json::to_string(response)?,
-            Self::Event(event) => serde_json::to_string(event)?,
-        };
-        Ok(format!(
-            "window.__NUVIO_BRIDGE_DELIVER__ && window.__NUVIO_BRIDGE_DELIVER__({payload});"
-        ))
-    }
-}
-
 /// Runs addon HTTP work behind its own lock so a slow catalog cannot block
 /// profile switching, settings, window commands, or other account IPC.
 pub fn handle_content_shared(

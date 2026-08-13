@@ -1,15 +1,10 @@
 fn main() {
-    println!("cargo:rerun-if-changed=assets/nuvio.ico");
-    // `include_dir!` bakes ui/dist into the binary at compile time, but cargo
-    // does not track files a proc macro reads. Without this, rebuilding after a
-    // UI-only change can silently ship the previously embedded bundle.
+    // `tauri::generate_context!` bakes ui/dist into the binary at compile time,
+    // but cargo does not track files a proc macro reads. Without this,
+    // rebuilding after a UI-only change can silently ship the previous bundle.
     println!("cargo:rerun-if-changed=../ui/dist");
-    #[cfg(windows)]
-    {
-        let mut resource = winresource::WindowsResource::new();
-        resource.set_icon("assets/nuvio.ico");
-        resource
-            .compile()
-            .expect("failed to embed the Nuvio Windows icon");
-    }
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+    // Embeds the Windows icon and the app manifest, replacing the hand-rolled
+    // winresource step.
+    tauri_build::build();
 }
