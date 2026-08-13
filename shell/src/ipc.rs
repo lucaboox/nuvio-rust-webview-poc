@@ -78,15 +78,42 @@ pub fn handle_content_shared(
             json!({ "segments": segments }),
         ))]);
     }
+    if request.method == "player.thumbnail" {
+        let position_ms = request
+            .params
+            .get("positionMs")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let source = shared_state.lock().ok()?.player.source();
+        let dll = crate::player::find_mpv();
+        let response = match (source, dll) {
+            (Some((url, headers)), Some(dll)) => {
+                match crate::thumbnail::capture(&dll, &url, &headers, position_ms) {
+                    Ok(bytes) => success(
+                        request.id,
+                        json!({ "image": format!("data:image/jpeg;base64,{}", base64(&bytes)) }),
+                    ),
+                    Err(error) => failure(request.id, "thumbnail_failed", error.to_string()),
+                }
+            }
+            _ => failure(
+                request.id,
+                "thumbnail_unavailable",
+                "Nothing is playing".to_string(),
+            ),
+        };
+        return Some(vec![OutboundMessage::Response(response)]);
+    }
     if !request.method.starts_with("content.") {
         return None;
     }
-    let (content, addons, metadata_config) = {
+    let (content, addons, metadata_config, home_layout) = {
         let state = shared_state.lock().ok()?;
         (
             Arc::clone(&state.content),
             state.addons.clone(),
             state.metadata_config.clone(),
+            state.home_layout.clone(),
         )
     };
     let id = request.id.clone();
@@ -132,7 +159,11 @@ pub fn handle_content_shared(
         }
     };
     let response = match request.method.as_str() {
-        "content.home" => success(id, json!(content.load_home(&addons))),
+        "content.home" => success(id, json!(content.load_home(&addons, &home_layout))),
+        "content.discoverCatalogs" => success(
+            id,
+            json!({ "catalogs": content.discover_catalogs(&addons) }),
+        ),
         "content.search" => match string_param(&request.params, "query") {
             Some(query) => success(id, json!(content.search(&addons, query))),
             None => failure(id, "invalid_params", "Search requires a query".to_string()),
@@ -232,20 +263,7 @@ pub fn handle_content_shared(
             });
             match sources {
                 Some(sources) => {
-                    let mut sections = Vec::new();
-                    let mut errors = Vec::new();
-                    for source in sources {
-                        match content.collection_catalog(
-                            &addons,
-                            &source.addon_id,
-                            &source.content_type,
-                            &source.catalog_id,
-                            source.genre.as_deref(),
-                        ) {
-                            Ok(section) => sections.push(section),
-                            Err(error) => errors.push(error.to_string()),
-                        }
-                    }
+                    let (sections, errors) = content.collection_folder(&addons, &sources);
                     success(id, json!({ "sections": sections, "errors": errors }))
                 }
                 None => failure(
@@ -597,6 +615,80 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 ),
             }
         }
+        "homeLayout.list" => match state.load_home_layout() {
+            Ok(layout) => {
+                state.home_layout = layout.plan();
+                success(id, json!(layout.ui_state()))
+            }
+            Err(error) => failure(id, "home_layout_load_failed", error.to_string()),
+        },
+        "homeLayout.update" => {
+            let key = string_param(&request.params, "key");
+            let action = string_param(&request.params, "action").unwrap_or_default();
+            let flag = request.params.get("enabled").and_then(Value::as_bool);
+            let mutation = match action {
+                "setEnabled" => match (key, flag) {
+                    (Some(key), Some(enabled)) => {
+                        Some(crate::home_layout::Mutation::SetEnabled { key, enabled })
+                    }
+                    _ => None,
+                },
+                "setHeroSourceEnabled" => match (key, flag) {
+                    (Some(key), Some(enabled)) => Some(
+                        crate::home_layout::Mutation::SetHeroSourceEnabled { key, enabled },
+                    ),
+                    _ => None,
+                },
+                "setCustomTitle" => match (key, string_param(&request.params, "title")) {
+                    (Some(key), Some(title)) => {
+                        Some(crate::home_layout::Mutation::SetCustomTitle { key, title })
+                    }
+                    _ => None,
+                },
+                "setHeroEnabled" => flag.map(crate::home_layout::Mutation::SetHeroEnabled),
+                "setShowCatalogType" => flag.map(crate::home_layout::Mutation::SetShowCatalogType),
+                "setHideUnreleasedContent" => {
+                    flag.map(crate::home_layout::Mutation::SetHideUnreleasedContent)
+                }
+                "move" => {
+                    let from = request.params.get("from").and_then(Value::as_u64);
+                    let to = request.params.get("to").and_then(Value::as_u64);
+                    match (from, to) {
+                        (Some(from), Some(to)) => Some(crate::home_layout::Mutation::Move {
+                            from: from as usize,
+                            to: to as usize,
+                        }),
+                        _ => None,
+                    }
+                }
+                "reset" => Some(crate::home_layout::Mutation::Reset),
+                _ => None,
+            };
+            match mutation {
+                Some(mutation) => {
+                    let definitions = state.home_catalog_definitions();
+                    let collections = state.synced_collections();
+                    match crate::home_layout::apply(
+                        &state.auth,
+                        state.active_profile_index,
+                        definitions,
+                        &collections,
+                        mutation,
+                    ) {
+                        Ok(layout) => {
+                            state.home_layout = layout.plan();
+                            success(id, json!(layout.ui_state()))
+                        }
+                        Err(error) => failure(id, "home_layout_update_failed", error.to_string()),
+                    }
+                }
+                None => failure(
+                    id,
+                    "invalid_params",
+                    "Unknown or incomplete home layout action".to_string(),
+                ),
+            }
+        }
         "library.list" => match crate::library::list(&state.auth, state.active_profile_index) {
             Ok(items) => success(id, json!({ "items": items })),
             Err(error) => failure(id, "library_load_failed", error.to_string()),
@@ -607,6 +699,17 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 Err(error) => failure(id, "collections_load_failed", error.to_string()),
             }
         }
+        "collections.availableCatalogs" => match state.content.lock() {
+            Ok(mut content) => success(
+                id,
+                json!({ "catalogs": content.available_collection_catalogs(&state.addons) }),
+            ),
+            Err(_) => failure(
+                id,
+                "content_unavailable",
+                "Content service is unavailable".to_string(),
+            ),
+        },
         "collections.reorder" => {
             let collection_id = string_param(&request.params, "collectionId");
             let folder_id = string_param(&request.params, "folderId");
@@ -630,6 +733,66 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     id,
                     "invalid_params",
                     "A collection id is required".to_string(),
+                ),
+            }
+        }
+        "collections.toggleCatalog" => {
+            let collection_id = string_param(&request.params, "collectionId");
+            let folder_id = string_param(&request.params, "folderId");
+            let source = request.params.get("source").cloned().and_then(|value| {
+                serde_json::from_value::<crate::collections::CollectionCatalogSource>(value).ok()
+            });
+            match (collection_id, folder_id, source) {
+                (Some(collection_id), Some(folder_id), Some(source)) => {
+                    match crate::collections::toggle_catalog(
+                        &state.auth,
+                        state.active_profile_index,
+                        collection_id,
+                        folder_id,
+                        source,
+                    ) {
+                        Ok(collections) => success(id, json!({ "collections": collections })),
+                        Err(error) => {
+                            failure(id, "collection_catalog_update_failed", error.to_string())
+                        }
+                    }
+                }
+                _ => failure(
+                    id,
+                    "invalid_params",
+                    "Collection, folder and catalog source are required".to_string(),
+                ),
+            }
+        }
+        "collections.reorderCatalog" => {
+            let collection_id = string_param(&request.params, "collectionId");
+            let folder_id = string_param(&request.params, "folderId");
+            let source_index = request.params.get("sourceIndex").and_then(Value::as_u64);
+            let direction = request
+                .params
+                .get("direction")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            match (collection_id, folder_id, source_index) {
+                (Some(collection_id), Some(folder_id), Some(source_index)) => {
+                    match crate::collections::reorder_catalog(
+                        &state.auth,
+                        state.active_profile_index,
+                        collection_id,
+                        folder_id,
+                        source_index as usize,
+                        direction,
+                    ) {
+                        Ok(collections) => success(id, json!({ "collections": collections })),
+                        Err(error) => {
+                            failure(id, "collection_catalog_reorder_failed", error.to_string())
+                        }
+                    }
+                }
+                _ => failure(
+                    id,
+                    "invalid_params",
+                    "Collection, folder and catalog index are required".to_string(),
                 ),
             }
         }
@@ -683,6 +846,50 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 "Progress lookup requires an id".to_string(),
             ),
         },
+        "progress.setWatched" => {
+            let identity = request.params.get("identity").cloned().and_then(|value| {
+                serde_json::from_value::<crate::progress::PlaybackIdentity>(value).ok()
+            });
+            let watched = request.params.get("watched").and_then(Value::as_bool);
+            let title = string_param(&request.params, "title").unwrap_or_default();
+            match (identity, watched) {
+                (Some(identity), Some(watched)) => unit_result(
+                    id,
+                    crate::progress::set_watched(
+                        &state.auth,
+                        state.active_profile_index,
+                        &identity,
+                        title,
+                        watched,
+                    ),
+                ),
+                _ => failure(
+                    id,
+                    "invalid_params",
+                    "A playback identity and watched flag are required".to_string(),
+                ),
+            }
+        }
+        "progress.clear" => {
+            let identity = request.params.get("identity").cloned().and_then(|value| {
+                serde_json::from_value::<crate::progress::PlaybackIdentity>(value).ok()
+            });
+            match identity {
+                Some(identity) => unit_result(
+                    id,
+                    crate::progress::clear_progress(
+                        &state.auth,
+                        state.active_profile_index,
+                        &identity,
+                    ),
+                ),
+                None => failure(
+                    id,
+                    "invalid_params",
+                    "A playback identity is required".to_string(),
+                ),
+            }
+        }
         "progress.snapshot" => {
             let entries = crate::progress::list(&state.auth, state.active_profile_index);
             let watched_items = crate::progress::watched(&state.auth, state.active_profile_index);
@@ -712,7 +919,11 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         },
         "content.home" => {
             let addons = state.addons.clone();
-            success(id, json!(state.content.lock().unwrap().load_home(&addons)))
+            let plan = state.home_layout.clone();
+            success(
+                id,
+                json!(state.content.lock().unwrap().load_home(&addons, &plan)),
+            )
         }
         "content.search" => {
             let query = string_param(&request.params, "query");
@@ -843,6 +1054,27 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         "player.toggleMute" => unit_result(id, state.player.toggle_mute()),
         "player.cycleAudio" => unit_result(id, state.player.cycle_audio()),
         "player.cycleSubtitle" => unit_result(id, state.player.cycle_subtitle()),
+        "player.setSpeed" => {
+            let speed = request.params.get("speed").and_then(Value::as_f64);
+            match speed {
+                Some(speed) => unit_result(id, state.player.set_speed(speed)),
+                None => failure(id, "invalid_params", "A speed is required".to_string()),
+            }
+        }
+        "player.setAudioTrack" => {
+            let track = request.params.get("id").and_then(Value::as_i64);
+            match track {
+                Some(track) => unit_result(id, state.player.set_audio_track(track)),
+                None => failure(id, "invalid_params", "A track id is required".to_string()),
+            }
+        }
+        "player.setSubtitleTrack" => {
+            let track = request.params.get("id").and_then(Value::as_i64);
+            match track {
+                Some(track) => unit_result(id, state.player.set_subtitle_track(track)),
+                None => failure(id, "invalid_params", "A track id is required".to_string()),
+            }
+        }
         "player.stop" => {
             state.player.stop();
             success(id, json!({ "stopped": true }))
@@ -891,15 +1123,28 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             });
             match (media_id, identity) {
                 (Some(media_id), Some(identity)) => {
+                    // Captured at prepare time so progress lands on the profile that
+                    // started playback, even if the user switches profiles mid-episode.
+                    let auth = state.auth.clone();
+                    let profile_id = state.active_profile_index;
                     match state.player.prepare(
                         media_id.to_string(),
                         url,
                         request_headers,
                         start_position_ms,
-                        // Keep the experimental player read-only against the account until
-                        // its lifecycle and completion semantics have full Nuvio parity.
-                        Box::new(move |_position, _duration| {
-                            let _ = &identity;
+                        // Fires once, as the playback loop tears down. Progress mid-episode
+                        // is not checkpointed, so a crash loses the session.
+                        Box::new(move |position, duration, reached_eof| {
+                            if let Err(error) = crate::progress::push(
+                                &auth,
+                                profile_id,
+                                &identity,
+                                position,
+                                duration,
+                                reached_eof,
+                            ) {
+                                eprintln!("watch progress push failed: {error:#}");
+                            }
                         }),
                     ) {
                         Ok(status) => success(id, json!({ "status": status })),
@@ -938,6 +1183,26 @@ fn unit_result(id: String, result: anyhow::Result<()>) -> ResponseEnvelope {
         Ok(()) => success(id, json!({ "ok": true })),
         Err(error) => failure(id, "player_command_failed", error.to_string()),
     }
+}
+
+/// Small base64 encoder so the JPEG can ride the JSON bridge as a data URI.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let triple = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(triple >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[triple as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 fn string_param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {

@@ -5,6 +5,7 @@ mod assets;
 mod auth;
 mod collections;
 mod content;
+mod home_layout;
 mod ipc;
 mod library;
 mod metadata;
@@ -12,6 +13,7 @@ mod player;
 mod progress;
 mod settings;
 mod skip_segments;
+mod thumbnail;
 
 use std::sync::{Arc, Mutex};
 

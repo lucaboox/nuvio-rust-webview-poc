@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
-import type { ContentMeta, LibraryItem } from "../bridge/types";
+import type { ContentMeta } from "../bridge/types";
 import { Icon } from "./Icon";
+import { isInLibrary, setLibraryMembership } from "../data/libraryCache";
 
 const openEvent = "nuvio-title-context-menu";
 const libraryChangedEvent = "nuvio-library-changed";
@@ -40,21 +41,8 @@ export function TitleContextMenu({
     const open = (event: Event) => {
       const detail = (event as CustomEvent<MenuRequest>).detail;
       setMenu(detail);
-      setSaved(detail.savedHint ?? false);
+      setSaved(detail.savedHint ?? isInLibrary(detail.item));
       setBusy(false);
-      if (detail.savedHint == null) {
-        invoke<{ items: LibraryItem[] }>("library.list")
-          .then((result) =>
-            setSaved(
-              result.items.some(
-                (item) =>
-                  item.id === detail.item.id &&
-                  item.contentType === detail.item.contentType,
-              ),
-            ),
-          )
-          .catch(() => undefined);
-      }
     };
     const dismiss = () => setMenu(null);
     window.addEventListener(openEvent, open);
@@ -82,6 +70,7 @@ export function TitleContextMenu({
           id: menu.item.id,
         });
       else await invoke("library.add", { item: menu.item });
+      setLibraryMembership(menu.item, !saved);
       setSaved(!saved);
       window.dispatchEvent(new Event(libraryChangedEvent));
       setMenu(null);
@@ -113,7 +102,12 @@ export function TitleContextMenu({
           <Icon name="info" size={18} />
           <span>View details</span>
         </button>
-        <button role="menuitem" disabled={busy} onClick={toggleLibrary}>
+        <button
+          role="menuitem"
+          className={saved ? "menu-destructive" : undefined}
+          disabled={busy}
+          onClick={toggleLibrary}
+        >
           <Icon name={saved ? "close" : "plus"} size={18} />
           <span>{saved ? "Remove from library" : "Add to library"}</span>
         </button>

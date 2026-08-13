@@ -14,7 +14,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
 };
 
-use super::PlayerState;
+use super::{PlayerState, PlayerTrack};
 
 #[derive(Clone, Debug)]
 pub enum PlayerCommand {
@@ -25,6 +25,9 @@ pub enum PlayerCommand {
     ToggleMute,
     CycleAudio,
     CycleSubtitle,
+    SetAudio(i64),
+    SetSubtitle(i64),
+    SetSpeed(f64),
     Stop,
 }
 
@@ -48,6 +51,7 @@ type MpvCommand = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> i32
 type MpvCommandAsync = unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> i32;
 type MpvWaitEvent = unsafe extern "C" fn(*mut c_void, f64) -> *const MpvEvent;
 type MpvGetProperty = unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut c_void) -> i32;
+type MpvFree = unsafe extern "C" fn(*mut c_void);
 type MpvDestroy = unsafe extern "C" fn(*mut c_void);
 
 pub fn launch(
@@ -56,7 +60,7 @@ pub fn launch(
     request_headers: Vec<String>,
     start_position_ms: i64,
     state: Arc<Mutex<PlayerState>>,
-    on_progress: Box<dyn Fn(i64, i64) + Send + 'static>,
+    on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
 ) -> Result<mpsc::Sender<PlayerCommand>> {
     let dll = find_mpv().context("libmpv-2.dll was not found")?;
     let (commands, receiver) = mpsc::channel();
@@ -85,7 +89,7 @@ pub fn launch(
     Ok(commands)
 }
 
-fn find_mpv() -> Option<PathBuf> {
+pub fn find_mpv() -> Option<PathBuf> {
     std::env::var_os("NUVIO_LIBMPV_PATH")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
@@ -108,7 +112,7 @@ fn run_player(
     start_position_ms: i64,
     state: &Arc<Mutex<PlayerState>>,
     receiver: mpsc::Receiver<PlayerCommand>,
-    on_progress: Box<dyn Fn(i64, i64) + Send + 'static>,
+    on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
 ) -> Result<()> {
     unsafe {
         let library = Library::new(dll_path).context("could not load libmpv-2.dll")?;
@@ -121,6 +125,7 @@ fn run_player(
         let mpv_command_async = *library.get::<MpvCommandAsync>(b"mpv_command_async\0")?;
         let mpv_wait_event = *library.get::<MpvWaitEvent>(b"mpv_wait_event\0")?;
         let mpv_get_property = *library.get::<MpvGetProperty>(b"mpv_get_property\0")?;
+        let mpv_free = *library.get::<MpvFree>(b"mpv_free\0")?;
         let mpv_destroy = *library.get::<MpvDestroy>(b"mpv_terminate_destroy\0")?;
 
         // Match Nuvio's Windows bridge: mpv renders into the same native host
@@ -207,26 +212,27 @@ fn run_player(
             mpv_destroy(handle);
             bail!("libmpv initialization failed");
         }
+        // `start` is applied as an option rather than a loadfile argument: the
+        // position of loadfile's index/options parameters changed between mpv
+        // releases, so passing them positionally silently drops the resume point
+        // on the version that does not expect them.
         if start_position_ms > 0 {
-            command(
-                mpv_command,
+            set_option(
+                mpv_set_option_string,
                 handle,
-                &[
-                    "loadfile",
-                    source,
-                    "replace",
-                    "-1",
-                    &format!("start={:.3}", start_position_ms as f64 / 1000.0),
-                ],
+                "start",
+                &format!("{:.3}", start_position_ms as f64 / 1000.0),
             )?;
-        } else {
-            command(mpv_command, handle, &["loadfile", source])?;
         }
+        command(mpv_command, handle, &["loadfile", source])?;
 
         let mut position = start_position_ms as f64 / 1000.0;
         let mut duration = 0.0f64;
         let mut sample_tick = 0u32;
         let mut stopped = false;
+        let mut reached_eof = false;
+        let mut track_count = -1i64;
+        let mut tracks: Vec<PlayerTrack> = Vec::new();
         while !stopped {
             let mut message: MSG = std::mem::zeroed();
             while PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -276,6 +282,30 @@ fn run_player(
                     PlayerCommand::CycleSubtitle => {
                         let _ = command_async(mpv_command_async, handle, 2, &["cycle", "sid"]);
                     }
+                    PlayerCommand::SetAudio(id) => {
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            3,
+                            &["set", "aid", &track_value(id)],
+                        );
+                    }
+                    PlayerCommand::SetSubtitle(id) => {
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            4,
+                            &["set", "sid", &track_value(id)],
+                        );
+                    }
+                    PlayerCommand::SetSpeed(speed) => {
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            5,
+                            &["set", "speed", &format!("{speed:.3}")],
+                        );
+                    }
                     PlayerCommand::Stop => stopped = true,
                 }
             }
@@ -285,13 +315,16 @@ fn run_player(
                     1 => stopped = true,
                     7 => {
                         let end = (*event).data.cast::<MpvEventEndFile>();
+                        // MPV_END_FILE_REASON_EOF. Distinguishes "watched to the
+                        // end" from "closed early", which is what decides whether
+                        // Nuvio marks the episode finished.
+                        if !end.is_null() && (*end).reason == 0 {
+                            reached_eof = true;
+                        }
                         if !end.is_null() && (*end).error < 0 {
                             if let Ok(mut current) = state.lock() {
                                 current.loading = false;
-                                current.error = Some(format!(
-                                    "The selected source could not be played (libmpv error {}). Try refreshing sources or choosing another result.",
-                                    (*end).error
-                                ));
+                                current.error = Some(mpv_error_message((*end).error));
                             }
                         }
                     }
@@ -318,6 +351,22 @@ fn run_player(
                 let _ = get_flag(mpv_get_property, handle, "pause", &mut paused);
                 let _ = get_flag(mpv_get_property, handle, "mute", &mut muted);
                 let _ = get_double(mpv_get_property, handle, "volume", &mut volume);
+
+                // The full track list is only re-read when the count changes;
+                // the selected ids are cheap enough to poll every sample.
+                let count = get_int(mpv_get_property, handle, "track-list/count").unwrap_or(0);
+                if count != track_count {
+                    track_count = count;
+                    tracks = read_tracks(mpv_get_property, mpv_free, handle, count);
+                }
+                let audio_id = get_int(mpv_get_property, handle, "aid").unwrap_or(-1);
+                let subtitle_id = get_int(mpv_get_property, handle, "sid").unwrap_or(-1);
+                for track in &mut tracks {
+                    track.selected = match track.kind.as_str() {
+                        "audio" => track.id == audio_id,
+                        _ => track.id == subtitle_id,
+                    };
+                }
                 if let Ok(mut current) = state.lock() {
                     current.active = true;
                     current.paused = paused != 0;
@@ -325,12 +374,19 @@ fn run_player(
                     current.duration_ms = (duration * 1000.0) as i64;
                     current.volume = volume.round() as i64;
                     current.muted = muted != 0;
+                    current.audio_track = audio_id;
+                    current.subtitle_track = subtitle_id;
+                    current.tracks = tracks.clone();
                 }
             }
             thread::sleep(Duration::from_millis(15));
         }
         if position > 0.0 && duration > 0.0 {
-            on_progress((position * 1000.0) as i64, (duration * 1000.0) as i64);
+            on_progress(
+                (position * 1000.0) as i64,
+                (duration * 1000.0) as i64,
+                reached_eof,
+            );
         }
         mpv_destroy(handle);
         if let Ok(mut current) = state.lock() {
@@ -339,6 +395,84 @@ fn run_player(
         }
         Ok(())
     }
+}
+
+/// libmpv error codes, so a failure reads as a cause rather than a number.
+fn mpv_error_message(code: i32) -> String {
+    match code {
+        -13 => "This source could not be opened. The link may have expired — pick another source.",
+        -14 => "Audio output could not be initialised for this source.",
+        -15 => "Video output could not be initialised for this source.",
+        -16 => "The source contained nothing playable.",
+        -17 => "This source is in a format the player does not recognise.",
+        -18 => "This source uses an unsupported codec or container.",
+        -12 => "The player rejected the playback command.",
+        _ => "This source could not be played.",
+    }
+    .to_string()
+}
+
+/// mpv treats `no` as "disabled" for aid/sid; any other value is a track id.
+fn track_value(id: i64) -> String {
+    if id <= 0 { "no".to_string() } else { id.to_string() }
+}
+
+/// MPV_FORMAT_INT64 = 4.
+unsafe fn get_int(function: MpvGetProperty, handle: *mut c_void, name: &str) -> Option<i64> {
+    let name = CString::new(name).ok()?;
+    let mut value = 0i64;
+    let code = unsafe {
+        function(handle, name.as_ptr(), 4, &mut value as *mut i64 as *mut c_void)
+    };
+    (code >= 0).then_some(value)
+}
+
+/// MPV_FORMAT_STRING = 1. mpv allocates the buffer, so it must be freed.
+unsafe fn get_string(
+    function: MpvGetProperty,
+    free: MpvFree,
+    handle: *mut c_void,
+    name: &str,
+) -> Option<String> {
+    let name = CString::new(name).ok()?;
+    let mut raw: *mut c_char = ptr::null_mut();
+    let code = unsafe {
+        function(handle, name.as_ptr(), 1, &mut raw as *mut *mut c_char as *mut c_void)
+    };
+    if code < 0 || raw.is_null() {
+        return None;
+    }
+    let value = unsafe { std::ffi::CStr::from_ptr(raw) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { free(raw as *mut c_void) };
+    Some(value)
+}
+
+fn read_tracks(
+    get: MpvGetProperty,
+    free: MpvFree,
+    handle: *mut c_void,
+    count: i64,
+) -> Vec<PlayerTrack> {
+    (0..count.max(0))
+        .filter_map(|index| {
+            let kind = unsafe { get_string(get, free, handle, &format!("track-list/{index}/type")) }?;
+            if kind != "audio" && kind != "sub" {
+                return None;
+            }
+            let id = unsafe { get_int(get, handle, &format!("track-list/{index}/id")) }?;
+            Some(PlayerTrack {
+                id,
+                kind,
+                title: unsafe { get_string(get, free, handle, &format!("track-list/{index}/title")) }
+                    .unwrap_or_default(),
+                lang: unsafe { get_string(get, free, handle, &format!("track-list/{index}/lang")) }
+                    .unwrap_or_default(),
+                selected: false,
+            })
+        })
+        .collect()
 }
 
 unsafe fn set_option(

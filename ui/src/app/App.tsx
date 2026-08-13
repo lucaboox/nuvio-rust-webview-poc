@@ -3,6 +3,7 @@ import { invoke, onNativeEvent } from "../bridge/nativeBridge";
 import type {
   AccountPayload,
   AddonRow,
+  AvailableCollectionCatalog,
   AuthSnapshot,
   AvatarCatalogItem,
   BootstrapResult,
@@ -12,9 +13,11 @@ import type {
   HomePayload,
   NuvioCollection,
   NuvioProfile,
+  LibraryItem,
   ProgressSnapshot,
   SettingsSnapshot,
   StreamSource,
+  Video,
 } from "../bridge/types";
 import { AddonsPage } from "../components/AddonsPage";
 import { AuthGate } from "../components/AuthGate";
@@ -39,6 +42,11 @@ import {
 } from "../components/TitleContextMenu";
 import { PlayerPage } from "../components/PlayerPage";
 import type { ActivePlayback } from "../components/PlayerPage";
+import { TooltipLayer } from "../components/Tooltip";
+import { posterCardStyle, posterStyleVars } from "../data/posterSize";
+import { primeLibrary, resetLibraryCache } from "../data/libraryCache";
+import { DiscoverPage } from "../components/DiscoverPage";
+import { clearRecentSearches, forgetSearch, readRecentSearches, rememberSearch } from "../data/recentSearches";
 
 const navItems = [
   ["Home", "home"],
@@ -75,14 +83,21 @@ export function App() {
   const [catalogView, setCatalogView] = useState<CatalogSection | null>(null);
   const [catalogReturnNav, setCatalogReturnNav] = useState("Home");
   const [detailsReturnNav, setDetailsReturnNav] = useState("Home");
+  const [autoOpenSources, setAutoOpenSources] = useState(false);
+  const [recent, setRecent] = useState<string[]>(() => readRecentSearches());
+  const [searchOpen, setSearchOpen] = useState(false);
   const [libraryRevision, setLibraryRevision] = useState(0);
-  const [amoled, setAmoled] = useState(false);
+  const [appSettings, setAppSettings] = useState<SettingsSnapshot | null>(null);
+  const amoled = appSettings?.amoledEnabled ?? false;
+  const poster = posterCardStyle(appSettings);
   const [avatars, setAvatars] = useState<AvatarCatalogItem[]>([]);
   const [progress, setProgress] = useState<ProgressSnapshot>(emptyProgress);
   const [progressLibrary, setProgressLibrary] = useState<ContentMeta[]>([]);
   const [progressMetadata, setProgressMetadata] = useState<ContentMeta[]>([]);
   const [progressRevision, setProgressRevision] = useState(0);
   const [collections, setCollections] = useState<NuvioCollection[]>([]);
+  const [availableCollectionCatalogs, setAvailableCollectionCatalogs] =
+    useState<AvailableCollectionCatalog[]>([]);
   const [collectionsBusy, setCollectionsBusy] = useState(false);
   const [collectionsError, setCollectionsError] = useState<string | null>(null);
   const [collectionFolder, setCollectionFolder] = useState<{
@@ -135,7 +150,7 @@ export function App() {
   useEffect(() => {
     if (auth.status === "authenticated")
       invoke<SettingsSnapshot>("settings.load")
-        .then((settings) => setAmoled(settings.amoledEnabled))
+        .then(setAppSettings)
         .catch(() => undefined);
   }, [auth.status, activeProfileIndex]);
 
@@ -144,6 +159,7 @@ export function App() {
       setProgress(emptyProgress);
       setProgressLibrary([]);
       setProgressMetadata([]);
+      resetLibraryCache();
       return;
     }
     Promise.all([
@@ -155,6 +171,7 @@ export function App() {
       .then(async ([snapshot, library]) => {
         setProgress(snapshot);
         setProgressLibrary(library.items);
+        primeLibrary(library.items as LibraryItem[]);
         const recentIdentities = [
           ...snapshot.entries.map((entry) => ({
             id: entry.contentId,
@@ -206,7 +223,8 @@ export function App() {
   }, []);
 
   useEffect(
-    () => onLibraryChanged(() => setLibraryRevision((revision) => revision + 1)),
+    () =>
+      onLibraryChanged(() => setLibraryRevision((revision) => revision + 1)),
     [],
   );
 
@@ -226,13 +244,39 @@ export function App() {
     setCollectionsBusy(true);
     setCollectionsError(null);
     try {
+      const [saved, available] = await Promise.all([
+        invoke<{ collections: NuvioCollection[] }>("collections.list"),
+        invoke<{ catalogs: AvailableCollectionCatalog[] }>(
+          "collections.availableCatalogs",
+        ),
+      ]);
+      setCollections(saved.collections);
+      setAvailableCollectionCatalogs(available.catalogs);
+    } catch (error) {
+      setCollectionsError(
+        error instanceof Error ? error.message : "Could not sync collections",
+      );
+    } finally {
+      setCollectionsBusy(false);
+    }
+  }
+
+  async function mutateCollectionCatalog(
+    method: "collections.toggleCatalog" | "collections.reorderCatalog",
+    params: unknown,
+  ) {
+    setCollectionsBusy(true);
+    setCollectionsError(null);
+    try {
       setCollections(
-        (await invoke<{ collections: NuvioCollection[] }>("collections.list"))
+        (await invoke<{ collections: NuvioCollection[] }>(method, params))
           .collections,
       );
     } catch (error) {
       setCollectionsError(
-        error instanceof Error ? error.message : "Could not sync collections",
+        error instanceof Error
+          ? error.message
+          : "Could not update collection catalogs",
       );
     } finally {
       setCollectionsBusy(false);
@@ -349,15 +393,25 @@ export function App() {
       );
     }
   }
+  function playEpisode(video: Video) {
+    const context = activePlayback?.context;
+    if (!context) return;
+    const seed = selected ?? null;
+    setActivePlayback(null);
+    setProgressRevision((revision) => revision + 1);
+    if (!seed) return;
+    openDetails({ ...seed, selectedVideoId: video.id }, true);
+  }
   function leavePlayback() {
     setActivePlayback(null);
     setProgressRevision((revision) => revision + 1);
   }
-  async function submitSearch(event: FormEvent) {
-    event.preventDefault();
-    const value = query.trim();
+  async function runSearch(raw: string) {
+    const value = raw.trim();
     if (!value) return;
     setActiveNav("Search");
+    setRecent(rememberSearch(value));
+    setSearchOpen(false);
     setContentBusy(true);
     setContentError(null);
     setSearchResult(null);
@@ -371,6 +425,10 @@ export function App() {
       setContentBusy(false);
     }
   }
+  function submitSearch(event: FormEvent) {
+    event.preventDefault();
+    void runSearch(query);
+  }
   function openCatalog(section: CatalogSection) {
     setCatalogReturnNav(activeNav === "Catalog" ? "Home" : activeNav);
     setCatalogView(section);
@@ -380,9 +438,10 @@ export function App() {
     setCatalogView(null);
     setActiveNav(catalogReturnNav);
   }
-  function openDetails(item: ContentMeta) {
+  function openDetails(item: ContentMeta, autoOpenSources = false) {
     setDetailsReturnNav(activeNav === "Details" ? "Home" : activeNav);
     setSelected(item);
+    setAutoOpenSources(autoOpenSources);
     setActiveNav("Details");
   }
   function leaveDetails() {
@@ -420,15 +479,30 @@ export function App() {
     );
   if (activePlayback)
     return (
-      <PlayerPage
-        playback={activePlayback}
-        amoled={amoled}
-        onBack={leavePlayback}
-      />
+      <>
+        <PlayerPage
+          playback={activePlayback}
+          amoled={amoled}
+          settings={appSettings}
+          onBack={leavePlayback}
+          onPlayEpisode={playEpisode}
+        />
+        <TooltipLayer />
+      </>
     );
 
   return (
-    <div className={amoled ? "app-shell amoled" : "app-shell"}>
+    <div
+      className={[
+        "app-shell",
+        amoled ? "amoled" : "",
+        poster.hideLabels ? "hide-poster-labels" : "",
+        poster.landscapeCatalogs ? "landscape-catalogs" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={posterStyleVars(poster)}
+    >
       <aside className="sidebar">
         <div className="logo-mark">
           <img className="wordmark" src="/nuvio-wordmark.png" alt="Nuvio" />
@@ -450,16 +524,90 @@ export function App() {
       <main className="content">
         <header className="topbar">
           <div className="topbar-spacer" />
-          <form className="search-button search-form" onSubmit={submitSearch}>
-            <Icon name="search" />
-            <input
-              aria-label="Search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search movies and series…"
-            />
-            <kbd>Enter</kbd>
-          </form>
+          <div className="search-shell">
+            <form
+              className="search-button search-form"
+              onSubmit={submitSearch}
+              onMouseDown={(event) => {
+                // The input only fills part of the pill, so clicking the icon or
+                // the padding used to do nothing. Anything that is not a control
+                // hands focus to the field.
+                if ((event.target as HTMLElement).closest("button, input")) return;
+                event.preventDefault();
+                event.currentTarget.querySelector("input")?.focus();
+              }}
+            >
+              <Icon name="search" />
+              <input
+                aria-label="Search"
+                value={query}
+                onFocus={() => setSearchOpen(true)}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setSearchOpen(false);
+                }}
+                placeholder="Search movies and series…"
+              />
+              {query && (
+                <button
+                  type="button"
+                  className="search-clear"
+                  title="Clear search"
+                  aria-label="Clear search"
+                  onClick={() => {
+                    setQuery("");
+                    setSearchOpen(true);
+                  }}
+                >
+                  <Icon name="close" size={16} />
+                </button>
+              )}
+            </form>
+            {searchOpen && recent.length > 0 && (
+              <>
+                <button
+                  className="search-recent-dismiss"
+                  aria-label="Close recent searches"
+                  onClick={() => setSearchOpen(false)}
+                />
+                <div className="search-recent">
+                  <header>
+                    <span>RECENT</span>
+                    <button
+                      onClick={() => {
+                        setRecent(clearRecentSearches());
+                        setSearchOpen(false);
+                      }}
+                    >
+                      Clear all
+                    </button>
+                  </header>
+                  {recent.map((entry) => (
+                    <div className="search-recent-row" key={entry}>
+                      <button
+                        className="search-recent-run"
+                        onClick={() => {
+                          setQuery(entry);
+                          runSearch(entry);
+                        }}
+                      >
+                        <Icon name="search" size={15} />
+                        <span>{entry}</span>
+                      </button>
+                      <button
+                        className="search-recent-forget"
+                        title={`Remove "${entry}"`}
+                        aria-label={`Remove ${entry}`}
+                        onClick={() => setRecent(forgetSearch(entry))}
+                      >
+                        <Icon name="close" size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <ProfileMenu
             profiles={profiles}
             activeIndex={activeProfileIndex}
@@ -495,12 +643,36 @@ export function App() {
             <SettingsPage
               profileIndex={activeProfileIndex}
               collections={collections}
+              availableCatalogs={availableCollectionCatalogs}
               collectionsLoading={collectionsBusy}
               collectionsError={collectionsError}
               onRefreshCollections={refreshCollections}
               onReorderCollection={reorderCollection}
+              onToggleCatalog={(collectionId, folderId, source) =>
+                mutateCollectionCatalog("collections.toggleCatalog", {
+                  collectionId,
+                  folderId,
+                  source,
+                })
+              }
+              onReorderCatalog={(
+                collectionId,
+                folderId,
+                sourceIndex,
+                direction,
+              ) =>
+                mutateCollectionCatalog("collections.reorderCatalog", {
+                  collectionId,
+                  folderId,
+                  sourceIndex,
+                  direction,
+                })
+              }
               onOpenFolder={openCollectionFolder}
-              onThemeChange={setAmoled}
+              onSettingsChange={setAppSettings}
+              onHomeLayoutChanged={() =>
+                setContentRevision((revision) => revision + 1)
+              }
             />
           ) : activeNav === "Library" ? (
             <LibraryPage
@@ -521,9 +693,12 @@ export function App() {
             <DetailsPage
               seed={selected}
               progress={progress}
+              settings={appSettings}
+              autoOpenSources={autoOpenSources}
               onBack={leaveDetails}
               onPlay={preparePlayback}
               onLibraryChange={() => setLibraryRevision((value) => value + 1)}
+              onProgressChanged={() => setProgressRevision((value) => value + 1)}
             />
           ) : activeNav === "Home" ? (
             <ContentPage
@@ -536,7 +711,14 @@ export function App() {
               addons={addons}
               onCollectionFolder={openCollectionFolder}
               onSelect={openDetails}
+              onContinue={(item) => openDetails(item, true)}
               onSeeAll={openCatalog}
+            />
+          ) : activeNav === "Discover" ? (
+            <DiscoverPage
+              progress={progress}
+              addonSignature={addonSignature}
+              onSelect={openDetails}
             />
           ) : activeNav === "Search" ? (
             <SearchPage
@@ -576,6 +758,7 @@ export function App() {
         </div>
         <TitleContextMenu onSelect={openDetails} />
       </main>
+      <TooltipLayer />
     </div>
   );
 }
@@ -590,6 +773,7 @@ function ContentPage({
   addons,
   onCollectionFolder,
   onSelect,
+  onContinue,
   onSeeAll,
 }: {
   payload: HomePayload | null;
@@ -604,6 +788,7 @@ function ContentPage({
     folder: CollectionFolder,
   ): void;
   onSelect(item: ContentMeta): void;
+  onContinue(item: ContentMeta): void;
   onSeeAll(section: CatalogSection): void;
 }) {
   if (busy) return <LoadingRows label="Loading your addon catalogs…" />;
@@ -632,28 +817,65 @@ function ContentPage({
     ...catalogItems,
     ...progressLibrary,
   ]);
-  const orderedCollections = [...collections].sort(
-    (left, right) => Number(right.pinToTop) - Number(left.pinToTop),
+
+  // Rows come back in the order the home organizer defines, with collections
+  // interleaved between catalogs exactly as Nuvio renders them. If the layout
+  // could not be read we fall back to pinned collections, then catalogs.
+  const sectionsByKey = new Map(
+    payload.sections.map((section) => [section.prefKey, section]),
   );
+  const collectionsById = new Map(
+    collections
+      .filter((collection) => collection.folders.length > 0)
+      .map((collection) => [collection.id, collection]),
+  );
+  const orderedRows = payload.rows.length
+    ? payload.rows
+    : [
+        ...[...collections]
+          .sort((left, right) => Number(right.pinToTop) - Number(left.pinToTop))
+          .map((collection) => ({
+            key: `collection_${collection.id}`,
+            isCollection: true,
+            collectionId: collection.id,
+          })),
+        ...payload.sections.map((section) => ({
+          key: section.prefKey,
+          isCollection: false,
+          collectionId: undefined,
+        })),
+      ];
+
   return (
     <>
       <HomeHero items={heroItems} onSelect={onSelect} />
       {continuing.length > 0 && (
-        <ContinueWatchingRow cards={continuing} onSelect={onSelect} />
+        <ContinueWatchingRow cards={continuing} onSelect={onContinue} />
       )}
-      <CollectionRows
-        collections={orderedCollections}
-        onFolder={onCollectionFolder}
-      />
-      {payload.sections.map((section) => (
-        <MediaRow
-          key={section.key}
-          section={section}
-          progress={progress}
-          onSelect={onSelect}
-          onSeeAll={onSeeAll}
-        />
-      ))}
+      {orderedRows.map((row) => {
+        if (row.isCollection) {
+          const collection = row.collectionId
+            ? collectionsById.get(row.collectionId)
+            : undefined;
+          return collection ? (
+            <CollectionRows
+              key={row.key}
+              collections={[collection]}
+              onFolder={onCollectionFolder}
+            />
+          ) : null;
+        }
+        const section = sectionsByKey.get(row.key);
+        return section ? (
+          <MediaRow
+            key={row.key}
+            section={section}
+            progress={progress}
+            onSelect={onSelect}
+            onSeeAll={onSeeAll}
+          />
+        ) : null;
+      })}
     </>
   );
 }

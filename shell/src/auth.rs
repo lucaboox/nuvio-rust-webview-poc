@@ -432,8 +432,15 @@ impl AuthService {
     }
 
     pub fn push_addons(&self, profile_id: i32, addons: &[AddonRow]) -> Result<()> {
+        // `sort_order` is the addon's priority, not just display order: Nuvio
+        // resolves metadata by walking enabled addons in this order and taking
+        // the first one that answers. It is rewritten as a dense 0-based index
+        // on every push, and deduplicated by URL, exactly as Nuvio does — a
+        // duplicate row would otherwise shift every addon below it.
+        let mut seen = std::collections::HashSet::new();
         let items: Vec<_> = addons
             .iter()
+            .filter(|addon| seen.insert(addon.url.clone()))
             .enumerate()
             .map(|(index, addon)| {
                 json!({

@@ -19,6 +19,8 @@ pub struct CollectionSource {
     pub tmdb_id: Option<i64>,
     pub trakt_list_id: Option<i64>,
     pub media_type: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_how: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -112,6 +114,158 @@ pub fn reorder(
         }),
     )?;
     serde_json::from_value(payload).context("updated collections did not match Nuvio's schema")
+}
+
+pub fn toggle_catalog(
+    auth: &AuthService,
+    profile_id: i32,
+    collection_id: &str,
+    folder_id: &str,
+    source: CollectionCatalogSource,
+) -> Result<Vec<Collection>> {
+    mutate_folder(auth, profile_id, collection_id, folder_id, |folder| {
+        let sources = normalized_sources(folder)?;
+        let existing = sources
+            .iter()
+            .position(|item| addon_source_matches(item, &source));
+        if let Some(index) = existing {
+            sources.remove(index);
+        } else {
+            sources.push(json!({
+                "provider": "addon",
+                "addonId": source.addon_id,
+                "type": source.content_type,
+                "catalogId": source.catalog_id,
+                "genre": source.genre,
+            }));
+        }
+        sync_legacy_catalog_sources(folder)
+    })
+}
+
+pub fn reorder_catalog(
+    auth: &AuthService,
+    profile_id: i32,
+    collection_id: &str,
+    folder_id: &str,
+    source_index: usize,
+    direction: i64,
+) -> Result<Vec<Collection>> {
+    anyhow::ensure!(
+        matches!(direction, -1 | 1),
+        "catalog direction must be -1 or 1"
+    );
+    mutate_folder(auth, profile_id, collection_id, folder_id, |folder| {
+        let sources = normalized_sources(folder)?;
+        anyhow::ensure!(source_index < sources.len(), "catalog no longer exists");
+        let to = (source_index as i64 + direction).clamp(0, sources.len().saturating_sub(1) as i64)
+            as usize;
+        if source_index != to {
+            sources.swap(source_index, to);
+        }
+        sync_legacy_catalog_sources(folder)
+    })
+}
+
+fn mutate_folder(
+    auth: &AuthService,
+    profile_id: i32,
+    collection_id: &str,
+    folder_id: &str,
+    mutation: impl FnOnce(&mut Value) -> Result<()>,
+) -> Result<Vec<Collection>> {
+    let mut payload = raw_payload(auth, profile_id)?;
+    let collection = payload
+        .as_array_mut()
+        .context("collections payload was not a list")?
+        .iter_mut()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(collection_id))
+        .context("collection no longer exists")?;
+    let folder = collection
+        .get_mut("folders")
+        .and_then(Value::as_array_mut)
+        .and_then(|folders| {
+            folders
+                .iter_mut()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(folder_id))
+        })
+        .context("collection folder no longer exists")?;
+    mutation(folder)?;
+    push_payload(auth, profile_id, &payload)?;
+    serde_json::from_value(payload).context("updated collections did not match Nuvio's schema")
+}
+
+fn normalized_sources(folder: &mut Value) -> Result<&mut Vec<Value>> {
+    let needs_legacy = folder
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|items| items.is_empty())
+        .unwrap_or(true);
+    if needs_legacy {
+        let legacy = folder
+            .get("catalogSources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut item| {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("provider".to_string(), Value::String("addon".to_string()));
+                }
+                item
+            })
+            .collect();
+        folder["sources"] = Value::Array(legacy);
+    }
+    folder
+        .get_mut("sources")
+        .and_then(Value::as_array_mut)
+        .context("folder sources were not a list")
+}
+
+fn addon_source_matches(value: &Value, source: &CollectionCatalogSource) -> bool {
+    !matches!(
+        value.get("provider").and_then(Value::as_str),
+        Some("tmdb" | "trakt")
+    ) && value.get("addonId").and_then(Value::as_str) == Some(source.addon_id.as_str())
+        && value.get("type").and_then(Value::as_str) == Some(source.content_type.as_str())
+        && value.get("catalogId").and_then(Value::as_str) == Some(source.catalog_id.as_str())
+}
+
+fn sync_legacy_catalog_sources(folder: &mut Value) -> Result<()> {
+    let catalogs = folder
+        .get("sources")
+        .and_then(Value::as_array)
+        .context("folder sources were not a list")?
+        .iter()
+        .filter(|source| {
+            !matches!(
+                source.get("provider").and_then(Value::as_str),
+                Some("tmdb" | "trakt")
+            )
+        })
+        .filter_map(|source| {
+            Some(json!({
+                "addonId": source.get("addonId")?.as_str()?,
+                "type": source.get("type")?.as_str()?,
+                "catalogId": source.get("catalogId")?.as_str()?,
+                "genre": source.get("genre").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect();
+    folder["catalogSources"] = Value::Array(catalogs);
+    Ok(())
+}
+
+fn push_payload(auth: &AuthService, profile_id: i32, payload: &Value) -> Result<()> {
+    auth.rpc_unit(
+        "sync_push_collections",
+        &json!({
+            "p_profile_id": profile_id,
+            "p_collections_json": payload,
+            "p_origin_client_id": auth.sync_client_id(),
+        }),
+    )
 }
 
 fn raw_payload(auth: &AuthService, profile_id: i32) -> Result<Value> {

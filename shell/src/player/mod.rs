@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 mod ffi;
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+pub use native::find_mpv;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,10 +22,25 @@ pub struct PlayerState {
     pub subtitle_track: i64,
     pub title: String,
     pub error: Option<String>,
+    /// Audio and subtitle tracks reported by mpv, for the in-player pickers.
+    pub tracks: Vec<PlayerTrack>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerTrack {
+    pub id: i64,
+    /// mpv's own naming: "audio" or "sub".
+    pub kind: String,
+    pub title: String,
+    pub lang: String,
+    pub selected: bool,
 }
 
 pub struct PlayerService {
     prepared_media_id: Option<String>,
+    /// Kept so the thumbnailer can open the same stream independently.
+    source: Option<(String, Vec<String>)>,
     parent_hwnd: isize,
     state: Arc<Mutex<PlayerState>>,
     #[cfg(windows)]
@@ -34,6 +51,7 @@ impl Default for PlayerService {
     fn default() -> Self {
         Self {
             prepared_media_id: None,
+            source: None,
             parent_hwnd: 0,
             state: Arc::new(Mutex::new(PlayerState {
                 volume: 100,
@@ -79,13 +97,14 @@ impl PlayerService {
         url: Option<String>,
         request_headers: Vec<String>,
         start_position_ms: i64,
-        on_progress: Box<dyn Fn(i64, i64) + Send + 'static>,
+        on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
         let url = url.filter(|value| value.starts_with("http://") || value.starts_with("https://"))
             .ok_or_else(|| anyhow::anyhow!("This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."))?;
         anyhow::ensure!(self.parent_hwnd != 0, "main window handle is unavailable");
         self.stop();
         self.prepared_media_id = Some(media_id.clone());
+        self.source = Some((url.clone(), request_headers.clone()));
         if let Ok(mut state) = self.state.lock() {
             *state = PlayerState {
                 active: true,
@@ -153,6 +172,40 @@ impl PlayerService {
     }
     pub fn cycle_subtitle(&self) -> anyhow::Result<()> {
         self.send(native::PlayerCommand::CycleSubtitle)
+    }
+    pub fn set_audio_track(&self, id: i64) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetAudio(id))
+    }
+    pub fn set_subtitle_track(&self, id: i64) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetSubtitle(id))
+    }
+    /// The stream currently loaded, for callers that need to open it
+    /// independently of playback.
+    pub fn source(&self) -> Option<(String, Vec<String>)> {
+        self.source.clone()
+    }
+
+    /// Decodes a preview frame for the stream currently loaded.
+    pub fn thumbnail(&self, position_ms: i64) -> anyhow::Result<Vec<u8>> {
+        #[cfg(windows)]
+        {
+            let (url, headers) = self
+                .source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("nothing is playing"))?;
+            let dll = native::find_mpv()
+                .ok_or_else(|| anyhow::anyhow!("libmpv-2.dll was not found"))?;
+            return crate::thumbnail::capture(&dll, url, headers, position_ms);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = position_ms;
+            anyhow::bail!("thumbnails are implemented for Windows only")
+        }
+    }
+
+    pub fn set_speed(&self, speed: f64) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetSpeed(speed.clamp(0.25, 4.0)))
     }
 
     pub fn stop(&mut self) {

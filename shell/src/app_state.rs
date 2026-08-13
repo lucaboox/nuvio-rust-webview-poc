@@ -5,7 +5,9 @@ use std::{
 
 use crate::{
     auth::{AddonRow, AuthService, NuvioProfile},
+    collections::Collection,
     content::ContentService,
+    home_layout::{CatalogDefinition, HomeLayout, HomeLayoutPlan},
     metadata::MetadataConfig,
     player::PlayerService,
 };
@@ -20,6 +22,9 @@ pub struct AppState {
     pub addons: Vec<AddonRow>,
     pub content: Arc<Mutex<ContentService>>,
     pub metadata_config: MetadataConfig,
+    /// Cached so `content.home` can order rows without a Supabase round trip on
+    /// every render. Refreshed whenever the profile, addons or layout change.
+    pub home_layout: HomeLayoutPlan,
     pub session_restore_attempted: bool,
 }
 
@@ -35,6 +40,7 @@ impl Default for AppState {
             addons: Vec::new(),
             content: Arc::new(Mutex::new(ContentService::default())),
             metadata_config: MetadataConfig::default(),
+            home_layout: HomeLayoutPlan::default(),
             session_restore_attempted: false,
         }
     }
@@ -74,7 +80,42 @@ impl AppState {
         let effective_profile_id = self.effective_addon_profile_id();
         self.addons = self.auth.addons(effective_profile_id)?;
         self.content.lock().unwrap().invalidate();
+        // The organizer is per-profile and keyed by the installed catalogs, so
+        // it has to be reloaded on every path that swaps either one.
+        self.refresh_home_layout();
         Ok(())
+    }
+
+    /// Catalogs this device can render, keyed the way Nuvio syncs them.
+    pub fn home_catalog_definitions(&self) -> Vec<CatalogDefinition> {
+        self.content
+            .lock()
+            .map(|mut content| content.home_catalog_definitions(&self.addons))
+            .unwrap_or_default()
+    }
+
+    pub fn synced_collections(&self) -> Vec<Collection> {
+        crate::collections::list(&self.auth, self.active_profile_index).unwrap_or_default()
+    }
+
+    /// Pulls the organizer from Supabase. Read-only — never pushes, so opening
+    /// the app cannot rewrite what another device saved.
+    pub fn load_home_layout(&self) -> anyhow::Result<HomeLayout> {
+        crate::home_layout::load(
+            &self.auth,
+            self.active_profile_index,
+            self.home_catalog_definitions(),
+            &self.synced_collections(),
+        )
+    }
+
+    /// Best-effort: a layout that will not load must not block the home page,
+    /// so the default plan (everything visible, manifest order) stands in.
+    pub fn refresh_home_layout(&mut self) {
+        self.home_layout = self
+            .load_home_layout()
+            .map(|layout| layout.plan())
+            .unwrap_or_default();
     }
 
     pub fn refresh_metadata(&mut self) {
@@ -108,6 +149,9 @@ impl AppState {
             })
             .collect();
         self.content.lock().unwrap().invalidate();
+        // Installing or disabling an addon changes which catalogs the organizer
+        // knows about, so its definitions have to be rebuilt.
+        self.refresh_home_layout();
         Ok(())
     }
 

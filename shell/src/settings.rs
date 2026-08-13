@@ -18,6 +18,7 @@ pub struct SettingsSnapshot {
     pub subtitle_font_size: i64,
     pub subtitle_outline: bool,
     pub reuse_last_stream: bool,
+    pub reuse_last_stream_hours: i64,
     pub autoplay_mode: String,
     pub autoplay_next_episode: bool,
     pub skip_intro: bool,
@@ -25,6 +26,132 @@ pub struct SettingsSnapshot {
     pub show_file_size_badges: bool,
     pub badge_placement: String,
     pub episode_release_alerts: bool,
+    pub poster_width: i64,
+    pub poster_corner_radius: i64,
+    pub poster_hide_labels: bool,
+    pub poster_landscape_catalogs: bool,
+    /// Next-episode card thresholds, mirroring Nuvio's PlayerNextEpisodeRules.
+    pub next_episode_threshold_mode: String,
+    pub next_episode_threshold_percent: f64,
+    pub next_episode_threshold_minutes: f64,
+}
+
+/// Nuvio stores poster card style as a JSON *string* inside the settings blob
+/// rather than as typed preference entries, so it needs its own read/write path.
+const POSTER_PAYLOAD_KEY: &str = "poster_card_style_settings_payload";
+const DEFAULT_POSTER_WIDTH: i64 = 126;
+const DEFAULT_POSTER_CORNER_RADIUS: i64 = 12;
+
+fn poster_style(blob: &Value) -> Value {
+    blob.pointer(&format!("/features/{POSTER_PAYLOAD_KEY}"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Materialises every field Nuvio's `StoredPosterCardStylePreferences` carries.
+/// Kotlin serializes with `encodeDefaults = true`, so a payload written here
+/// should look exactly like one it wrote — and, critically, the hover-preview
+/// fields must survive a desktop write untouched.
+fn normalized_poster_style(style: &Value) -> Map<String, Value> {
+    let read_i64 = |key: &str, fallback: i64| style.get(key).and_then(Value::as_i64).unwrap_or(fallback);
+    let read_bool = |key: &str, fallback: bool| {
+        style.get(key).and_then(Value::as_bool).unwrap_or(fallback)
+    };
+    let width = read_i64("widthDp", DEFAULT_POSTER_WIDTH);
+    let mut object = Map::new();
+    object.insert("widthDp".to_string(), json!(width));
+    // Nuvio derives height from width (`width * 3 / 2`) and stores both. Writing
+    // a mismatched pair would render a stretched card on the other clients.
+    object.insert("heightDp".to_string(), json!(width * 3 / 2));
+    object.insert(
+        "cornerRadiusDp".to_string(),
+        json!(read_i64("cornerRadiusDp", DEFAULT_POSTER_CORNER_RADIUS)),
+    );
+    object.insert(
+        "catalogLandscapeModeEnabled".to_string(),
+        json!(read_bool("catalogLandscapeModeEnabled", false)),
+    );
+    object.insert(
+        "hideLabelsEnabled".to_string(),
+        json!(read_bool("hideLabelsEnabled", false)),
+    );
+    object.insert(
+        "hoverPreviewEnabled".to_string(),
+        json!(read_bool("hoverPreviewEnabled", true)),
+    );
+    object.insert(
+        "hoverPreviewOpenDelayMillis".to_string(),
+        json!(read_i64("hoverPreviewOpenDelayMillis", 2_000)),
+    );
+    object.insert(
+        "hoverPreviewTrailerEnabled".to_string(),
+        json!(read_bool("hoverPreviewTrailerEnabled", false)),
+    );
+    object.insert(
+        "hoverPreviewTrailerSoundEnabled".to_string(),
+        json!(read_bool("hoverPreviewTrailerSoundEnabled", false)),
+    );
+    object.insert(
+        "hoverPreviewTrailerStartSeconds".to_string(),
+        json!(read_i64("hoverPreviewTrailerStartSeconds", 0)),
+    );
+    object
+}
+
+fn set_poster_style(blob: &mut Value, key: &str, value: Value) -> Result<()> {
+    let mut style = normalized_poster_style(&poster_style(blob));
+    match key {
+        "posterWidth" => {
+            let width = value.as_i64().context("poster width must be a whole number")?;
+            bail_unless(
+                (80..=240).contains(&width),
+                "poster width must be between 80 and 240",
+            )?;
+            style.insert("widthDp".to_string(), json!(width));
+            style.insert("heightDp".to_string(), json!(width * 3 / 2));
+        }
+        "posterCornerRadius" => {
+            let radius = value.as_i64().context("corner radius must be a whole number")?;
+            bail_unless(
+                (0..=32).contains(&radius),
+                "corner radius must be between 0 and 32",
+            )?;
+            style.insert("cornerRadiusDp".to_string(), json!(radius));
+        }
+        "posterHideLabels" => {
+            style.insert(
+                "hideLabelsEnabled".to_string(),
+                json!(value.as_bool().context("hide labels must be true or false")?),
+            );
+        }
+        "posterLandscapeCatalogs" => {
+            style.insert(
+                "catalogLandscapeModeEnabled".to_string(),
+                json!(value
+                    .as_bool()
+                    .context("landscape posters must be true or false")?),
+            );
+        }
+        _ => bail!("unknown poster setting"),
+    }
+
+    let root = blob
+        .as_object_mut()
+        .context("settings blob is not an object")?;
+    let features = object_entry(root, "features")?;
+    features.insert(
+        POSTER_PAYLOAD_KEY.to_string(),
+        Value::String(serde_json::to_string(&Value::Object(style))?),
+    );
+    Ok(())
+}
+
+fn bail_unless(condition: bool, message: &'static str) -> Result<()> {
+    if condition { Ok(()) } else { bail!(message) }
 }
 
 pub fn load(auth: &AuthService, profile_id: i32) -> Result<(SettingsSnapshot, Value)> {
@@ -116,7 +243,9 @@ pub fn update(
     value: Value,
 ) -> Result<SettingsSnapshot> {
     let (_, mut blob) = load(auth, profile_id)?;
-    if key == "episodeReleaseAlerts" {
+    if key.starts_with("poster") {
+        set_poster_style(&mut blob, key, value)?;
+    } else if key == "episodeReleaseAlerts" {
         let enabled = value
             .as_bool()
             .context("episodeReleaseAlerts must be true or false")?;
@@ -168,6 +297,12 @@ fn snapshot(blob: &Value) -> SettingsSnapshot {
             .unwrap_or(true),
         reuse_last_stream: typed_bool(blob, "player_settings", "stream_reuse_last_link_enabled")
             .unwrap_or(false),
+        reuse_last_stream_hours: typed_i64(
+            blob,
+            "player_settings",
+            "stream_reuse_last_link_cache_hours",
+        )
+        .unwrap_or(24),
         autoplay_mode: typed_string(blob, "player_settings", "stream_auto_play_mode")
             .unwrap_or_else(|| "MANUAL".to_string()),
         autoplay_next_episode: typed_bool(
@@ -191,6 +326,40 @@ fn snapshot(blob: &Value) -> SettingsSnapshot {
             .pointer("/features/notifications_settings/episode_release_alerts_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        poster_width: poster_style(blob)
+            .get("widthDp")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_POSTER_WIDTH),
+        poster_corner_radius: poster_style(blob)
+            .get("cornerRadiusDp")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_POSTER_CORNER_RADIUS),
+        poster_hide_labels: poster_style(blob)
+            .get("hideLabelsEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        poster_landscape_catalogs: poster_style(blob)
+            .get("catalogLandscapeModeEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        next_episode_threshold_mode: typed_string(
+            blob,
+            "player_settings",
+            "next_episode_threshold_mode",
+        )
+        .unwrap_or_else(|| "PERCENTAGE".to_string()),
+        next_episode_threshold_percent: typed_f64(
+            blob,
+            "player_settings",
+            "next_episode_threshold_percent_v2",
+        )
+        .unwrap_or(99.0),
+        next_episode_threshold_minutes: typed_f64(
+            blob,
+            "player_settings",
+            "next_episode_threshold_minutes_before_end_v2",
+        )
+        .unwrap_or(2.0),
     }
 }
 
@@ -199,6 +368,7 @@ enum Kind {
     Boolean,
     String,
     Int,
+    Float,
 }
 
 fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
@@ -228,6 +398,26 @@ fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
             Kind::Boolean,
         ),
         "skipIntro" => ("player_settings", "skip_intro_enabled", Kind::Boolean),
+        "nextEpisodeThresholdMode" => (
+            "player_settings",
+            "next_episode_threshold_mode",
+            Kind::String,
+        ),
+        "nextEpisodeThresholdPercent" => (
+            "player_settings",
+            "next_episode_threshold_percent_v2",
+            Kind::Float,
+        ),
+        "nextEpisodeThresholdMinutes" => (
+            "player_settings",
+            "next_episode_threshold_minutes_before_end_v2",
+            Kind::Float,
+        ),
+        "reuseLastStreamHours" => (
+            "player_settings",
+            "stream_reuse_last_link_cache_hours",
+            Kind::Int,
+        ),
         "rtxSuperResolution" => (
             "player_settings",
             "nvidia_rtx_super_resolution_enabled",
@@ -252,6 +442,7 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         Kind::Boolean if !value.is_boolean() => bail!("{key} must be true or false"),
         Kind::String if !value.is_string() => bail!("{key} must be text"),
         Kind::Int if value.as_i64().is_none() => bail!("{key} must be a whole number"),
+        Kind::Float if value.as_f64().is_none() => bail!("{key} must be a number"),
         _ => {}
     }
     match key {
@@ -271,6 +462,25 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         }
         "subtitleFontSize" if !(12..=40).contains(&value.as_i64().unwrap_or_default()) => {
             bail!("subtitle size must be between 12 and 40")
+        }
+        "reuseLastStreamHours" if !(1..=720).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("link reuse window must be between 1 and 720 hours")
+        }
+        // Nuvio clamps these to the same ranges before use.
+        "nextEpisodeThresholdMode"
+            if !matches!(value.as_str(), Some("PERCENTAGE" | "MINUTES_BEFORE_END")) =>
+        {
+            bail!("unsupported next episode threshold mode")
+        }
+        "nextEpisodeThresholdPercent"
+            if !(97.0..=100.0).contains(&value.as_f64().unwrap_or_default()) =>
+        {
+            bail!("next episode percentage must be between 97 and 100")
+        }
+        "nextEpisodeThresholdMinutes"
+            if !(0.0..=3.5).contains(&value.as_f64().unwrap_or_default()) =>
+        {
+            bail!("next episode minutes must be between 0 and 3.5")
         }
         "preferredAudioLanguage" | "preferredSubtitleLanguage"
             if value.as_str().is_some_and(|text| text.len() > 16) =>
@@ -298,6 +508,7 @@ fn set_typed_preference(
         Kind::Boolean => "boolean",
         Kind::String => "string",
         Kind::Int => "int",
+        Kind::Float => "float",
     };
     feature_object.insert(
         key.to_string(),
@@ -333,6 +544,9 @@ fn typed_string(blob: &Value, feature: &str, key: &str) -> Option<String> {
 fn typed_i64(blob: &Value, feature: &str, key: &str) -> Option<i64> {
     typed_value(blob, feature, key, "int")?.as_i64()
 }
+fn typed_f64(blob: &Value, feature: &str, key: &str) -> Option<f64> {
+    typed_value(blob, feature, key, "float")?.as_f64()
+}
 fn empty_blob() -> Value {
     json!({ "version": 3, "features": {} })
 }
@@ -340,6 +554,66 @@ fn empty_blob() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poster_writes_preserve_hover_preview_settings() {
+        // The hover-preview and trailer options live in the same payload string.
+        // Rewriting it from a partial view would silently reset them.
+        let existing = json!({
+            "widthDp": 134,
+            "heightDp": 201,
+            "cornerRadiusDp": 4,
+            "hideLabelsEnabled": true,
+            "hoverPreviewEnabled": true,
+            "hoverPreviewOpenDelayMillis": 500,
+            "hoverPreviewTrailerEnabled": true,
+            "hoverPreviewTrailerSoundEnabled": true,
+            "hoverPreviewTrailerStartSeconds": 3
+        });
+        let mut blob = json!({
+            "version": 3,
+            "features": { POSTER_PAYLOAD_KEY: existing.to_string() }
+        });
+
+        set_poster_style(&mut blob, "posterWidth", json!(104)).unwrap();
+
+        let style = poster_style(&blob);
+        assert_eq!(style["widthDp"], json!(104));
+        // Height is derived, never left stale.
+        assert_eq!(style["heightDp"], json!(156));
+        assert_eq!(style["hoverPreviewTrailerEnabled"], json!(true));
+        assert_eq!(style["hoverPreviewTrailerSoundEnabled"], json!(true));
+        assert_eq!(style["hoverPreviewTrailerStartSeconds"], json!(3));
+        assert_eq!(style["hoverPreviewOpenDelayMillis"], json!(500));
+        assert_eq!(style["hideLabelsEnabled"], json!(true));
+        assert_eq!(style["cornerRadiusDp"], json!(4));
+    }
+
+    #[test]
+    fn poster_payload_is_a_json_string_with_every_field() {
+        let mut blob = json!({ "version": 3, "features": {} });
+        set_poster_style(&mut blob, "posterCornerRadius", json!(16)).unwrap();
+
+        // Nuvio decodes this field as a String, so it must not become an object.
+        let raw = blob.pointer(&format!("/features/{POSTER_PAYLOAD_KEY}")).unwrap();
+        assert!(raw.is_string());
+
+        let style = poster_style(&blob);
+        assert_eq!(style["cornerRadiusDp"], json!(16));
+        assert_eq!(style["widthDp"], json!(DEFAULT_POSTER_WIDTH));
+        assert_eq!(style["heightDp"], json!(189));
+        // encodeDefaults = true on the Kotlin side, so defaults are materialised.
+        assert_eq!(style["hoverPreviewEnabled"], json!(true));
+        assert_eq!(style.as_object().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn poster_values_outside_the_supported_range_are_rejected() {
+        let mut blob = json!({ "version": 3, "features": {} });
+        assert!(set_poster_style(&mut blob, "posterWidth", json!(9000)).is_err());
+        assert!(set_poster_style(&mut blob, "posterCornerRadius", json!(-1)).is_err());
+        assert!(set_poster_style(&mut blob, "posterWidth", json!("wide")).is_err());
+    }
 
     #[test]
     fn typed_settings_preserve_unrelated_fields() {

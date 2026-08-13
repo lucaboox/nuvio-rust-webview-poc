@@ -8,6 +8,13 @@ use serde_json::Value;
 use url::Url;
 
 use crate::auth::AddonRow;
+use crate::home_layout::{CatalogDefinition, HomeLayoutPlan, HomeLayoutRow, media_type_label};
+
+/// Nuvio fetches home catalogs in batches rather than all at once; this client
+/// fetches in parallel, so it caps the fan-out instead.
+const HOME_CATALOG_LIMIT: usize = 24;
+const HOME_HERO_ITEM_LIMIT: usize = 8;
+const COLLECTION_CATALOG_LIMIT: usize = 60;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
@@ -27,6 +34,8 @@ struct CatalogExtra {
     name: String,
     #[serde(default, rename = "isRequired")]
     is_required: bool,
+    #[serde(default)]
+    options: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -46,6 +55,8 @@ struct Manifest {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    version: String,
     #[serde(default)]
     logo: Option<String>,
     #[serde(default)]
@@ -198,6 +209,9 @@ pub struct Video {
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSection {
     pub key: String,
+    /// Nuvio home-layout key (`{manifest.id}:{type}:{catalogId}`). Distinct from
+    /// `key`, which is URL-based because this client fetches by manifest URL.
+    pub pref_key: String,
     pub title: String,
     pub subtitle: String,
     pub manifest_url: String,
@@ -212,6 +226,9 @@ pub struct CatalogSection {
 #[serde(rename_all = "camelCase")]
 pub struct HomePayload {
     pub sections: Vec<CatalogSection>,
+    /// Catalogs and collections interleaved in the user's configured order, the
+    /// way Nuvio's home screen walks `HomeCatalogSettingsItem`s.
+    pub rows: Vec<HomeLayoutRow>,
     pub hero: Option<ContentMeta>,
     pub hero_items: Vec<ContentMeta>,
     pub errors: Vec<String>,
@@ -222,6 +239,9 @@ pub struct HomePayload {
 pub struct AddonDescriptor {
     pub url: String,
     pub name: String,
+    /// Manifest `version`. Empty when the addon is unreachable, since the
+    /// manifest is fetched at runtime and never stored in the synced row.
+    pub version: String,
     pub enabled: bool,
     pub sort_order: i32,
     pub configurable: bool,
@@ -231,6 +251,32 @@ pub struct AddonDescriptor {
     pub resource_names: Vec<String>,
     pub logo: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverCatalog {
+    pub key: String,
+    pub addon_name: String,
+    pub manifest_url: String,
+    pub content_type: String,
+    pub catalog_id: String,
+    pub catalog_name: String,
+    pub genre_options: Vec<String>,
+    pub genre_required: bool,
+    pub supports_pagination: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableCollectionCatalog {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub content_type: String,
+    pub catalog_id: String,
+    pub catalog_name: String,
+    pub genre_options: Vec<String>,
+    pub genre_required: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -349,81 +395,186 @@ impl ContentService {
         let errors = self.ensure_manifests(addons);
         addons
             .iter()
-            .map(|addon| {
-                let normalized =
-                    normalize_manifest_url(&addon.url).unwrap_or_else(|_| addon.url.clone());
-                let installed = self.manifests.iter().find(|item| item.url == normalized);
-                let error = if installed.is_none() {
-                    errors
+            .map(|addon| self.describe(addon, &errors))
+            .collect()
+    }
+
+    fn describe(&self, addon: &AddonRow, errors: &[String]) -> AddonDescriptor {
+        let normalized = normalize_manifest_url(&addon.url).unwrap_or_else(|_| addon.url.clone());
+        let installed = self.manifests.iter().find(|item| item.url == normalized);
+        let error = if installed.is_none() {
+            errors
+                .iter()
+                .find(|message| message.contains(addon.name.as_deref().unwrap_or(&addon.url)))
+                .cloned()
+        } else {
+            None
+        };
+        AddonDescriptor {
+            url: normalized.clone(),
+            name: addon
+                .name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| installed.map(|item| item.display_name.clone()))
+                .unwrap_or_else(|| "Stremio addon".to_string()),
+            version: installed
+                .map(|item| item.manifest.version.clone())
+                .unwrap_or_default(),
+            enabled: addon.enabled,
+            sort_order: addon.sort_order,
+            configurable: installed
+                .map(|item| item.manifest.behavior_hints.configurable)
+                .unwrap_or(false),
+            configuration_required: installed
+                .map(|item| item.manifest.behavior_hints.configuration_required)
+                .unwrap_or(false),
+            configure_url: installed
+                .filter(|item| {
+                    item.manifest.behavior_hints.configurable
+                        || item.manifest.behavior_hints.configuration_required
+                })
+                .map(|_| configure_url(&normalized)),
+            catalog_count: installed
+                .map(|item| item.manifest.catalogs.len())
+                .unwrap_or(0),
+            resource_names: installed
+                .map(|item| {
+                    item.manifest
+                        .resources
                         .iter()
-                        .find(|message| {
-                            message.contains(addon.name.as_deref().unwrap_or(&addon.url))
+                        .map(|resource| match resource {
+                            Resource::Name(name) => name.clone(),
+                            Resource::Detailed { name, .. } => name.clone(),
                         })
-                        .cloned()
-                } else {
-                    None
-                };
-                AddonDescriptor {
-                    url: normalized.clone(),
-                    name: addon
-                        .name
-                        .clone()
-                        .filter(|name| !name.trim().is_empty())
-                        .or_else(|| installed.map(|item| item.display_name.clone()))
-                        .unwrap_or_else(|| "Stremio addon".to_string()),
-                    enabled: addon.enabled,
-                    sort_order: addon.sort_order,
-                    configurable: installed
-                        .map(|item| item.manifest.behavior_hints.configurable)
-                        .unwrap_or(false),
-                    configuration_required: installed
-                        .map(|item| item.manifest.behavior_hints.configuration_required)
-                        .unwrap_or(false),
-                    configure_url: installed
-                        .filter(|item| {
-                            item.manifest.behavior_hints.configurable
-                                || item.manifest.behavior_hints.configuration_required
+                        .collect()
+                })
+                .unwrap_or_default(),
+            logo: installed
+                .and_then(|item| item.manifest.logo.as_deref())
+                .and_then(|logo| resolve_asset_url(&normalized, logo)),
+            error,
+        }
+    }
+
+    pub fn available_collection_catalogs(
+        &mut self,
+        addons: &[AddonRow],
+    ) -> Vec<AvailableCollectionCatalog> {
+        self.ensure_manifests(addons);
+        self.manifests
+            .iter()
+            .flat_map(|installed| {
+                installed
+                    .manifest
+                    .catalogs
+                    .iter()
+                    .filter_map(move |catalog| {
+                        if catalog
+                            .extra
+                            .iter()
+                            .any(|extra| extra.is_required && extra.name != "genre")
+                        {
+                            return None;
+                        }
+                        let genre = catalog.extra.iter().find(|extra| extra.name == "genre");
+                        Some(AvailableCollectionCatalog {
+                            addon_id: installed.manifest.id.clone(),
+                            addon_name: installed.display_name.clone(),
+                            content_type: catalog.content_type.clone(),
+                            catalog_id: catalog.id.clone(),
+                            catalog_name: if catalog.name.trim().is_empty() {
+                                catalog.id.clone()
+                            } else {
+                                catalog.name.clone()
+                            },
+                            genre_options: genre
+                                .map(|extra| extra.options.clone())
+                                .unwrap_or_default(),
+                            genre_required: genre.map(|extra| extra.is_required).unwrap_or(false),
                         })
-                        .map(|_| configure_url(&normalized)),
-                    catalog_count: installed
-                        .map(|item| item.manifest.catalogs.len())
-                        .unwrap_or(0),
-                    resource_names: installed
-                        .map(|item| {
-                            item.manifest
-                                .resources
-                                .iter()
-                                .map(|resource| match resource {
-                                    Resource::Name(name) => name.clone(),
-                                    Resource::Detailed { name, .. } => name.clone(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    logo: installed
-                        .and_then(|item| item.manifest.logo.as_deref())
-                        .and_then(|logo| resolve_asset_url(&normalized, logo)),
-                    error,
+                    })
+            })
+            .collect()
+    }
+
+    /// Re-reads one addon's manifest, matching Nuvio's `refreshAddon`: it picks
+    /// up new catalogs, resources and version numbers without touching the
+    /// synced row, so it is not a reinstall.
+    /// Catalogs that can be browsed without a search term, mirroring Nuvio's
+    /// `AddonCatalog.supportsDiscover()`: a required `search` disqualifies a
+    /// catalog, `skip` never does, and a required `genre` is fine as long as the
+    /// manifest actually lists options to choose from.
+    pub fn discover_catalogs(&mut self, addons: &[AddonRow]) -> Vec<DiscoverCatalog> {
+        self.ensure_manifests(addons);
+        let mut seen = HashSet::new();
+        self.manifests
+            .iter()
+            .flat_map(|installed| {
+                installed
+                    .manifest
+                    .catalogs
+                    .iter()
+                    .map(move |catalog| (installed, catalog))
+            })
+            .filter(|(_, catalog)| supports_discover(catalog))
+            .filter_map(|(installed, catalog)| {
+                let key = format!(
+                    "{}:{}:{}",
+                    installed.manifest.id, catalog.content_type, catalog.id
+                );
+                if !seen.insert(key.clone()) {
+                    return None;
                 }
+                let genre = catalog.extra.iter().find(|extra| extra.name == "genre");
+                Some(DiscoverCatalog {
+                    key,
+                    addon_name: installed.display_name.clone(),
+                    manifest_url: installed.url.clone(),
+                    content_type: catalog.content_type.clone(),
+                    catalog_id: catalog.id.clone(),
+                    catalog_name: if catalog.name.trim().is_empty() {
+                        catalog.id.clone()
+                    } else {
+                        catalog.name.clone()
+                    },
+                    genre_options: genre.map(|extra| extra.options.clone()).unwrap_or_default(),
+                    genre_required: genre.map(|extra| extra.is_required).unwrap_or(false),
+                    supports_pagination: catalog
+                        .extra
+                        .iter()
+                        .any(|extra| extra.name.eq_ignore_ascii_case("skip")),
+                })
             })
             .collect()
     }
 
     pub fn refresh_addon(&mut self, addon: &AddonRow) -> Result<AddonDescriptor> {
         let installed = fetch_manifest(&self.client, addon)?;
-        let normalized = installed.url.clone();
-        self.manifests.retain(|item| item.url != normalized);
-        self.manifests.push(installed);
-        self.addon_signature.clear();
-        self.addon_descriptors(std::slice::from_ref(addon))
-            .into_iter()
-            .next()
-            .context("addon refresh returned no descriptor")
+        // Replace in place. Manifest position is addon priority, so a refresh
+        // must not quietly promote or demote the addon, and the cached
+        // signature still holds because the addon *set* has not changed —
+        // invalidating it would force a refetch of every other addon.
+        match self
+            .manifests
+            .iter()
+            .position(|item| item.url == installed.url)
+        {
+            Some(index) => self.manifests[index] = installed,
+            None => self.manifests.push(installed),
+        }
+        Ok(self.describe(addon, &[]))
     }
 
-    pub fn load_home(&mut self, addons: &[AddonRow]) -> HomePayload {
+    pub fn load_home(&mut self, addons: &[AddonRow], plan: &HomeLayoutPlan) -> HomePayload {
         let mut errors = self.ensure_manifests(addons);
-        let tasks = self.catalog_tasks(false);
+        // Order before capping so the rows the user put on top are the ones
+        // actually fetched — Nuvio's `prioritizeDefinitions` does the same.
+        let mut tasks = self.catalog_tasks(false);
+        tasks.retain(|task| plan.is_enabled(&task.pref_key));
+        tasks.sort_by_key(|task| plan.order_of(&task.pref_key));
+        tasks.truncate(HOME_CATALOG_LIMIT);
+
         let client = &self.client;
         let mut results: Vec<_> = tasks
             .par_iter()
@@ -435,39 +586,86 @@ impl ContentService {
         let mut sections = Vec::new();
         for (_, result) in results {
             match result {
-                Ok(section) if !section.items.is_empty() => sections.push(section),
-                Ok(_) => {}
+                Ok(mut section) => {
+                    if plan.hide_unreleased_content {
+                        section.items.retain(|item| {
+                            !crate::home_layout::is_unreleased(
+                                item.released.as_deref(),
+                                item.release_info.as_deref(),
+                            )
+                        });
+                    }
+                    if section.items.is_empty() {
+                        continue;
+                    }
+                    section.title = match plan.custom_title(&section.pref_key) {
+                        Some(title) => title.to_string(),
+                        None if plan.show_catalog_type => {
+                            format!(
+                                "{} - {}",
+                                section.title,
+                                media_type_label(&section.content_type)
+                            )
+                        }
+                        None => section.title.clone(),
+                    };
+                    sections.push(section);
+                }
                 Err(error) => errors.push(error.to_string()),
             }
         }
+
         // Round-robin the installed catalogs so the first addon does not own
         // every carousel slot, and avoid repeated ids across catalogs.
         let mut hero_items = Vec::new();
-        let mut seen = HashSet::new();
-        let max_items = sections
-            .iter()
-            .map(|section| section.items.len())
-            .max()
-            .unwrap_or_default();
-        'rows: for item_index in 0..max_items {
-            for section in &sections {
-                let Some(item) = section.items.get(item_index) else {
-                    continue;
-                };
-                let identity = format!("{}:{}", item.content_type, item.id);
-                if seen.insert(identity)
-                    && (item.background.is_some() || item.banner.is_some() || item.poster.is_some())
-                {
-                    hero_items.push(item.clone());
-                    if hero_items.len() == 8 {
-                        break 'rows;
+        if plan.hero_enabled {
+            let hero_sections: Vec<&CatalogSection> = sections
+                .iter()
+                .filter(|section| plan.is_hero_source(&section.pref_key))
+                .collect();
+            let mut seen = HashSet::new();
+            let max_items = hero_sections
+                .iter()
+                .map(|section| section.items.len())
+                .max()
+                .unwrap_or_default();
+            'rows: for item_index in 0..max_items {
+                for section in &hero_sections {
+                    let Some(item) = section.items.get(item_index) else {
+                        continue;
+                    };
+                    let identity = format!("{}:{}", item.content_type, item.id);
+                    if seen.insert(identity)
+                        && (item.background.is_some()
+                            || item.banner.is_some()
+                            || item.poster.is_some())
+                    {
+                        hero_items.push(item.clone());
+                        if hero_items.len() == HOME_HERO_ITEM_LIMIT {
+                            break 'rows;
+                        }
                     }
                 }
             }
         }
+
+        // Only advertise rows we can actually render: a catalog that returned
+        // nothing would otherwise leave a hole in the ordered list.
+        let renderable: HashSet<&str> = sections
+            .iter()
+            .map(|section| section.pref_key.as_str())
+            .collect();
+        let rows = plan
+            .rows
+            .iter()
+            .filter(|row| row.is_collection || renderable.contains(row.key.as_str()))
+            .cloned()
+            .collect();
+
         let hero = hero_items.first().cloned();
         HomePayload {
             sections,
+            rows,
             hero,
             hero_items,
             errors,
@@ -476,7 +674,8 @@ impl ContentService {
 
     pub fn search(&mut self, addons: &[AddonRow], query: &str) -> HomePayload {
         let mut errors = self.ensure_manifests(addons);
-        let tasks = self.catalog_tasks(true);
+        let mut tasks = self.catalog_tasks(true);
+        tasks.truncate(HOME_CATALOG_LIMIT);
         let client = &self.client;
         let mut results: Vec<_> = tasks
             .par_iter()
@@ -490,13 +689,25 @@ impl ContentService {
         let mut sections = Vec::new();
         for (_, result) in results {
             match result {
-                Ok(section) if !section.items.is_empty() => sections.push(section),
+                Ok(mut section) if !section.items.is_empty() => {
+                    // Addons commonly name every search catalog "Search", so the
+                    // media type is what actually distinguishes the rows. Nuvio
+                    // titles these "{catalog} • {type}" via discover_catalog_context —
+                    // note the bullet, where the home rows use a hyphen.
+                    section.title = format!(
+                        "{} • {}",
+                        section.title,
+                        media_type_label(&section.content_type)
+                    );
+                    sections.push(section);
+                }
                 Ok(_) => {}
                 Err(error) => errors.push(error.to_string()),
             }
         }
         HomePayload {
             sections,
+            rows: Vec::new(),
             hero: None,
             hero_items: Vec::new(),
             errors,
@@ -526,6 +737,7 @@ impl ContentService {
             .context("the addon no longer exposes this catalog")?;
         let task = CatalogTask {
             key: format!("{}:{}:{}", installed.url, content_type, catalog_id),
+            pref_key: format!("{}:{}:{}", installed.manifest.id, content_type, catalog_id),
             title: if catalog.name.is_empty() {
                 catalog.id.clone()
             } else {
@@ -544,15 +756,13 @@ impl ContentService {
         fetch_catalog(&self.client, &task, extra.as_deref(), 60)
     }
 
-    pub fn collection_catalog(
-        &mut self,
-        addons: &[AddonRow],
+    fn collection_catalog_task(
+        &self,
         addon_id: &str,
         content_type: &str,
         catalog_id: &str,
         genre: Option<&str>,
-    ) -> Result<CatalogSection> {
-        self.ensure_manifests(addons);
+    ) -> Result<CatalogTask> {
         let installed = self
             .manifests
             .iter()
@@ -570,7 +780,7 @@ impl ContentService {
         } else {
             catalog.name.clone()
         };
-        let task = CatalogTask {
+        Ok(CatalogTask {
             key: format!(
                 "collection:{}:{}:{}:{}",
                 addon_id,
@@ -578,6 +788,7 @@ impl ContentService {
                 catalog_id,
                 genre.unwrap_or_default()
             ),
+            pref_key: format!("{addon_id}:{content_type}:{catalog_id}"),
             title: genre
                 .map(|value| format!("{base_title} · {value}"))
                 .unwrap_or(base_title),
@@ -586,9 +797,58 @@ impl ContentService {
             content_type: content_type.to_string(),
             catalog_id: catalog_id.to_string(),
             genre: genre.map(str::to_string),
-        };
-        let extra = catalog_extras(genre, 0);
-        fetch_catalog(&self.client, &task, extra.as_deref(), 60)
+        })
+    }
+
+    /// Loads every catalog in a collection folder at once.
+    ///
+    /// Nuvio gives each folder tab its own coroutine, so a ten-catalog folder
+    /// costs one round trip rather than ten. Fetching these in sequence is what
+    /// made a large folder sit there — the addons are independent hosts and
+    /// nothing here depends on the previous response.
+    pub fn collection_folder(
+        &mut self,
+        addons: &[AddonRow],
+        sources: &[crate::collections::CollectionCatalogSource],
+    ) -> (Vec<CatalogSection>, Vec<String>) {
+        let mut errors = self.ensure_manifests(addons);
+        let mut tasks = Vec::new();
+        for source in sources {
+            match self.collection_catalog_task(
+                &source.addon_id,
+                &source.content_type,
+                &source.catalog_id,
+                source.genre.as_deref(),
+            ) {
+                Ok(task) => tasks.push(task),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+
+        let client = &self.client;
+        let mut results: Vec<_> = tasks
+            .par_iter()
+            .enumerate()
+            .map(|(index, task)| {
+                let extra = catalog_extras(task.genre.as_deref(), 0);
+                (
+                    index,
+                    fetch_catalog(client, task, extra.as_deref(), COLLECTION_CATALOG_LIMIT),
+                )
+            })
+            .collect();
+        // The folder's own source order is meaningful, so restore it.
+        results.sort_by_key(|(index, _)| *index);
+
+        let mut sections = Vec::new();
+        for (_, result) in results {
+            match result {
+                Ok(section) if !section.items.is_empty() => sections.push(section),
+                Ok(_) => {}
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        (sections, errors)
     }
 
     pub fn details(
@@ -782,6 +1042,10 @@ impl ContentService {
                         }
                         Some(CatalogTask {
                             key,
+                            pref_key: format!(
+                                "{}:{}:{}",
+                                installed.manifest.id, catalog.content_type, catalog.id
+                            ),
                             title: if catalog.name.is_empty() {
                                 catalog.id.clone()
                             } else {
@@ -796,7 +1060,46 @@ impl ContentService {
                     })
                     .collect::<Vec<_>>()
             })
-            .take(24)
+            .collect()
+    }
+
+    /// The catalogs the home organizer can reorder. Keyed by manifest id — the
+    /// key Nuvio syncs — and deduplicated the same way `buildHomeCatalogDefinitions`
+    /// does with `distinctBy(key)`.
+    pub fn home_catalog_definitions(&mut self, addons: &[AddonRow]) -> Vec<CatalogDefinition> {
+        self.ensure_manifests(addons);
+        let mut seen = HashSet::new();
+        self.manifests
+            .iter()
+            .flat_map(|installed| {
+                installed
+                    .manifest
+                    .catalogs
+                    .iter()
+                    .map(move |catalog| (installed, catalog))
+            })
+            .filter(|(_, catalog)| !catalog.extra.iter().any(|extra| extra.is_required))
+            .filter_map(|(installed, catalog)| {
+                let key = format!(
+                    "{}:{}:{}",
+                    installed.manifest.id, catalog.content_type, catalog.id
+                );
+                if !seen.insert(key.clone()) {
+                    return None;
+                }
+                Some(CatalogDefinition {
+                    key,
+                    addon_id: installed.manifest.id.clone(),
+                    content_type: catalog.content_type.clone(),
+                    catalog_id: catalog.id.clone(),
+                    catalog_name: if catalog.name.trim().is_empty() {
+                        catalog.id.clone()
+                    } else {
+                        catalog.name.clone()
+                    },
+                    addon_name: installed.display_name.clone(),
+                })
+            })
             .collect()
     }
 }
@@ -804,12 +1107,30 @@ impl ContentService {
 #[derive(Clone)]
 struct CatalogTask {
     key: String,
+    pref_key: String,
     title: String,
     subtitle: String,
     manifest_url: String,
     content_type: String,
     catalog_id: String,
     genre: Option<String>,
+}
+
+/// Mirrors `AddonCatalog.supportsDiscover()`.
+fn supports_discover(catalog: &ManifestCatalog) -> bool {
+    if catalog
+        .extra
+        .iter()
+        .any(|extra| extra.name == "search" && extra.is_required)
+    {
+        return false;
+    }
+    !catalog.extra.iter().any(|extra| match extra.name.as_str() {
+        // A required genre is browsable as long as the manifest offers choices.
+        "genre" => extra.is_required && extra.options.is_empty(),
+        "skip" | "search" => false,
+        _ => extra.is_required,
+    })
 }
 
 fn catalog_extras(genre: Option<&str>, skip: usize) -> Option<String> {
@@ -876,6 +1197,7 @@ fn fetch_catalog(
     }
     Ok(CatalogSection {
         key: task.key.clone(),
+        pref_key: task.pref_key.clone(),
         title: task.title.clone(),
         subtitle: task.subtitle.clone(),
         manifest_url: task.manifest_url.clone(),
@@ -1276,6 +1598,7 @@ mod tests {
                 manifest: Manifest {
                     id: "example".to_string(),
                     name: "Example".to_string(),
+                    version: "1.2.3".to_string(),
                     logo: None,
                     types: vec!["movie".to_string()],
                     id_prefixes: Vec::new(),
@@ -1287,6 +1610,7 @@ mod tests {
                         extra: vec![CatalogExtra {
                             name: "search".to_string(),
                             is_required: false,
+                            options: Vec::new(),
                         }],
                     }],
                     behavior_hints: ManifestBehaviorHints::default(),
@@ -1296,6 +1620,92 @@ mod tests {
 
         assert_eq!(service.catalog_tasks(false).len(), 1);
         assert_eq!(service.catalog_tasks(true).len(), 1);
+    }
+
+    fn installed(url: &str, id: &str, version: &str) -> InstalledManifest {
+        InstalledManifest {
+            url: url.to_string(),
+            display_name: id.to_string(),
+            manifest: Manifest {
+                id: id.to_string(),
+                name: id.to_string(),
+                version: version.to_string(),
+                logo: None,
+                types: Vec::new(),
+                id_prefixes: Vec::new(),
+                resources: Vec::new(),
+                catalogs: Vec::new(),
+                behavior_hints: ManifestBehaviorHints::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_refreshed_manifest_keeps_its_priority_slot() {
+        // Regression: refresh used to remove-then-append, which silently moved
+        // the addon to the bottom. Manifest order is addon priority — Nuvio
+        // resolves metadata by taking the first addon that answers.
+        let mut service = ContentService {
+            client: Client::new(),
+            addon_signature: "cached".to_string(),
+            manifests: vec![
+                installed("https://a.test/manifest.json", "a", "1.0.0"),
+                installed("https://b.test/manifest.json", "b", "1.0.0"),
+                installed("https://c.test/manifest.json", "c", "1.0.0"),
+            ],
+        };
+
+        let refreshed = installed("https://b.test/manifest.json", "b", "2.0.0");
+        match service
+            .manifests
+            .iter()
+            .position(|item| item.url == refreshed.url)
+        {
+            Some(index) => service.manifests[index] = refreshed,
+            None => service.manifests.push(refreshed),
+        }
+
+        let order: Vec<&str> = service
+            .manifests
+            .iter()
+            .map(|item| item.manifest.id.as_str())
+            .collect();
+        assert_eq!(order, vec!["a", "b", "c"]);
+        assert_eq!(service.manifests[1].manifest.version, "2.0.0");
+        // The addon set did not change, so other manifests must survive.
+        assert_eq!(service.manifests.len(), 3);
+        assert_eq!(service.addon_signature, "cached");
+    }
+
+    #[test]
+    fn descriptors_expose_the_live_manifest_version() {
+        let service = ContentService {
+            client: Client::new(),
+            addon_signature: String::new(),
+            manifests: vec![installed("https://a.test/manifest.json", "a", "3.1.4")],
+        };
+        let reachable = service.describe(
+            &AddonRow {
+                url: "https://a.test/manifest.json".to_string(),
+                name: Some("A".to_string()),
+                enabled: true,
+                sort_order: 0,
+            },
+            &[],
+        );
+        assert_eq!(reachable.version, "3.1.4");
+
+        // An unreachable addon has no manifest, so there is no version to show.
+        let missing = service.describe(
+            &AddonRow {
+                url: "https://gone.test/manifest.json".to_string(),
+                name: Some("Gone".to_string()),
+                enabled: true,
+                sort_order: 1,
+            },
+            &[],
+        );
+        assert_eq!(missing.version, "");
     }
 
     #[test]

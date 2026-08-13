@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type {
+  AvailableCollectionCatalog,
   CatalogSection,
   CollectionCatalogSource,
   CollectionFolder,
+  CollectionSource,
   ContentMeta,
   HomePayload,
   NuvioCollection,
@@ -16,19 +18,34 @@ import { showTitleContextMenu } from "./TitleContextMenu";
 
 export function CollectionSettingsSection({
   collections,
+  availableCatalogs,
   loading,
   error,
   onRefresh,
   onReorder,
+  onToggleCatalog,
+  onReorderCatalog,
   onFolder,
 }: {
   collections: NuvioCollection[];
+  availableCatalogs: AvailableCollectionCatalog[];
   loading: boolean;
   error: string | null;
   onRefresh(): void;
   onReorder(
     collectionId: string,
     folderId: string | undefined,
+    direction: -1 | 1,
+  ): void;
+  onToggleCatalog(
+    collectionId: string,
+    folderId: string,
+    source: CollectionCatalogSource,
+  ): void;
+  onReorderCatalog(
+    collectionId: string,
+    folderId: string,
+    sourceIndex: number,
     direction: -1 | 1,
   ): void;
   onFolder(collection: NuvioCollection, folder: CollectionFolder): void;
@@ -113,6 +130,14 @@ export function CollectionSettingsSection({
                         <Icon name="down" size={17} />
                       </button>
                     </div>
+                    <FolderCatalogSettings
+                      collection={collection}
+                      folder={folder}
+                      availableCatalogs={availableCatalogs}
+                      loading={loading}
+                      onToggleCatalog={onToggleCatalog}
+                      onReorderCatalog={onReorderCatalog}
+                    />
                   </div>
                 ))}
               </div>
@@ -182,6 +207,178 @@ export function CollectionRows({
           ),
       )}
     </>
+  );
+}
+
+function FolderCatalogSettings({
+  collection,
+  folder,
+  availableCatalogs,
+  loading,
+  onToggleCatalog,
+  onReorderCatalog,
+}: {
+  collection: NuvioCollection;
+  folder: CollectionFolder;
+  availableCatalogs: AvailableCollectionCatalog[];
+  loading: boolean;
+  onToggleCatalog(
+    collectionId: string,
+    folderId: string,
+    source: CollectionCatalogSource,
+  ): void;
+  onReorderCatalog(
+    collectionId: string,
+    folderId: string,
+    sourceIndex: number,
+    direction: -1 | 1,
+  ): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const sources: CollectionSource[] =
+    folder.sources.length > 0
+      ? folder.sources
+      : folder.catalogSources.map((source) => ({
+          provider: "addon",
+          ...source,
+        }));
+  const selected = (catalog: AvailableCollectionCatalog) =>
+    sources.some(
+      (source) =>
+        source.provider.toLowerCase() === "addon" &&
+        source.addonId === catalog.addonId &&
+        source.type === catalog.contentType &&
+        source.catalogId === catalog.catalogId,
+    );
+  return (
+    <div className="folder-catalog-editor">
+      <button
+        className="folder-catalog-toggle"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>
+          {sources.length} catalog{sources.length === 1 ? "" : "s"}
+        </span>
+        <Icon name={open ? "up" : "down"} size={15} />
+      </button>
+      {open && (
+        <div className="folder-catalog-body">
+          <div className="collection-selected-catalogs">
+            {sources.length === 0 ? (
+              <span className="collection-no-catalogs">
+                No catalogs selected
+              </span>
+            ) : (
+              sources.map((source, index) => {
+                const available = availableCatalogs.find(
+                  (catalog) =>
+                    catalog.addonId === source.addonId &&
+                    catalog.contentType === source.type &&
+                    catalog.catalogId === source.catalogId,
+                );
+                const isAddon = !["tmdb", "trakt"].includes(
+                  source.provider.toLowerCase(),
+                );
+                return (
+                  <div
+                    className={`collection-catalog-item${isAddon && !available ? " unavailable" : ""}`}
+                    key={`${source.provider}:${source.addonId}:${source.type}:${source.catalogId}:${index}`}
+                  >
+                    <div>
+                      <strong>
+                        {source.title ||
+                          available?.catalogName ||
+                          source.catalogId ||
+                          `${source.provider} source`}
+                      </strong>
+                      <span>
+                        {available?.addonName ||
+                          (isAddon
+                            ? "Addon unavailable or disabled"
+                            : source.provider.toUpperCase())}
+                        {source.genre ? ` · ${source.genre}` : ""}
+                      </span>
+                    </div>
+                    <div className="reorder-buttons">
+                      <button
+                        disabled={loading || index === 0}
+                        onClick={() =>
+                          onReorderCatalog(collection.id, folder.id, index, -1)
+                        }
+                      >
+                        <Icon name="up" size={15} />
+                      </button>
+                      <button
+                        disabled={loading || index === sources.length - 1}
+                        onClick={() =>
+                          onReorderCatalog(collection.id, folder.id, index, 1)
+                        }
+                      >
+                        <Icon name="down" size={15} />
+                      </button>
+                      {isAddon &&
+                        source.addonId &&
+                        source.type &&
+                        source.catalogId && (
+                          <button
+                            className="catalog-remove"
+                            disabled={loading}
+                            onClick={() =>
+                              onToggleCatalog(collection.id, folder.id, {
+                                addonId: source.addonId!,
+                                type: source.type!,
+                                catalogId: source.catalogId!,
+                                genre: source.genre,
+                              })
+                            }
+                          >
+                            <Icon name="close" size={15} />
+                          </button>
+                        )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <details className="collection-catalog-picker">
+            <summary>Add catalogs from enabled addons</summary>
+            <div>
+              {availableCatalogs.map((catalog) => (
+                <label
+                  key={`${catalog.addonId}:${catalog.contentType}:${catalog.catalogId}`}
+                >
+                  <span>
+                    <strong>{catalog.catalogName}</strong>
+                    <small>
+                      {catalog.addonName} · {catalog.contentType}
+                      {catalog.genreRequired ? " · genre required" : ""}
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={selected(catalog)}
+                    disabled={loading || catalog.genreRequired}
+                    onChange={() =>
+                      onToggleCatalog(collection.id, folder.id, {
+                        addonId: catalog.addonId,
+                        type: catalog.contentType,
+                        catalogId: catalog.catalogId,
+                      })
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+            {availableCatalogs.length === 0 && (
+              <span className="collection-no-catalogs">
+                No compatible catalogs from enabled addons.
+              </span>
+            )}
+          </details>
+        </div>
+      )}
+    </div>
   );
 }
 

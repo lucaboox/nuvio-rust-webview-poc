@@ -1,12 +1,34 @@
-type IconName = "home" | "discover" | "library" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down";
+import {
+  Compass, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
+  SlidersHorizontal, type LucideIcon,
+} from "lucide-react";
+
+type IconName = "home" | "discover" | "library" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "check" | "video" | "episodes" | "sources" | "eye";
+
+/**
+ * Icons sourced from Lucide, whose 24x24 / round-cap style this set already
+ * imitates. Hand-drawn geometry is kept for the rest; anything added here
+ * renders at the same stroke weight so the two blend.
+ */
+const lucide: Partial<Record<IconName, LucideIcon>> = {
+  episodes: ListVideo,
+  sources: Layers,
+  home: House,
+  discover: Compass,
+  library: Library,
+  addons: Puzzle,
+  settings: SlidersHorizontal,
+  play: Play,
+  pause: Pause,
+};
 
 const paths: Record<IconName, React.ReactNode> = {
   home: <><path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9"/><path d="M9 20v-6h6v6"/></>,
   discover: <><circle cx="12" cy="12" r="9"/><path d="m16 8-2.4 5.6L8 16l2.4-5.6L16 8Z"/><circle cx="12" cy="12" r=".8" fill="currentColor" stroke="none"/></>,
-  library: <><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v16M12 4v16"/></>,
+  library: <><path d="M4 4.5v15"/><path d="M8.5 6.5v13"/><path d="M13 4.5v15"/><path d="m16.9 5.6 3.9 13.6"/></>,
   collections: <><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1.5"/><rect x="3.5" y="14" width="7" height="6" rx="1.5"/><rect x="13.5" y="14" width="7" height="6" rx="1.5"/></>,
-  addons: <path d="M19.4 13.5h-1.7a2.7 2.7 0 1 0-5.2 0H9.6v-2.9a2.7 2.7 0 1 0 0-5.2V3.6H4.1a.5.5 0 0 0-.5.5v5.5h1.8a2.7 2.7 0 1 1 0 5.2H3.6v5.1c0 .3.2.5.5.5h5.5v-1.7a2.7 2.7 0 1 1 5.2 0v1.7h5.1c.3 0 .5-.2.5-.5v-5.9c0-.3-.4-.5-1-.5Z"/>,
-  settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.58 15 1.7 1.7 0 0 0 3 14H3v-4h.08A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.58 1.7 1.7 0 0 0 10 3V3h4v.08a1.7 1.7 0 0 0 1.05 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.42 9 1.7 1.7 0 0 0 21 10v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></>,
+  addons: <path d="M6.5 6h3.3a2.2 2.2 0 1 1 4.4 0h3.3a1 1 0 0 1 1 1v3.3a2.2 2.2 0 1 0 0 4.4V18a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1v-3.3a2.2 2.2 0 1 0 0-4.4V7a1 1 0 0 1 1-1Z"/>,
+  settings: <><path d="M4 7h8"/><path d="M16.5 7H20"/><path d="M4 17h3.5"/><path d="M12 17h8"/><circle cx="14.2" cy="7" r="2.3"/><circle cx="9.8" cy="17" r="2.3"/></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></>,
   play: <path d="m9 6 9 6-9 6V6Z" fill="currentColor" stroke="none"/>,
   pause: <><path d="M8 6v12M16 6v12" strokeWidth="3"/></>,
@@ -26,8 +48,19 @@ const paths: Record<IconName, React.ReactNode> = {
   copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
   up: <path d="m6 15 6-6 6 6"/>,
   down: <path d="m6 9 6 6 6-6"/>,
+  edit: <><path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14.5 5.5 3 3"/></>,
+  drag: <><path d="M4 8h16M4 12h16M4 16h16"/></>,
+  trash: <><path d="M4 7h16"/><path d="M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Z"/><path d="M6.5 7v12.5a1.5 1.5 0 0 0 1.5 1.5h8a1.5 1.5 0 0 0 1.5-1.5V7"/><path d="M10.5 11v6M13.5 11v6"/></>,
+  external: <><path d="M14 4h6v6"/><path d="m20 4-8.5 8.5"/><path d="M18 14.5V19a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 19V8a1.5 1.5 0 0 1 1.5-1.5H10"/></>,
+  check: <path d="m5 12.5 4.5 4.5L19 7.5"/>,
+  eye: <><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></>,
+  episodes: <><rect x="3" y="4.5" width="13" height="10" rx="1.6"/><path d="M18.5 6.5v11.5a1.5 1.5 0 0 1-1.5 1.5H6"/><path d="M21 8.5v9"/></>,
+  sources: <><path d="M12 3.2 20.5 8 12 12.8 3.5 8Z"/><path d="m3.5 12 8.5 4.8 8.5-4.8"/><path d="m3.5 16 8.5 4.8 8.5-4.8"/></>,
+  video: <><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><path d="M10 9.2v5.6l4.8-2.8z"/></>,
 };
 
 export function Icon({ name, size = 21 }: { name: IconName; size?: number }) {
+  const Glyph = lucide[name];
+  if (Glyph) return <Glyph size={size} strokeWidth={1.7} aria-hidden="true" />;
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }

@@ -95,8 +95,22 @@ export type Video = {
   available: boolean;
 };
 
-export type MetaPerson = { name: string; role?: string; photo?: string; tmdbId?: number };
-export type MetaTrailer = { id: string; key: string; name: string; site: string; trailerType: string; official?: boolean; publishedAt?: string; seasonNumber?: number };
+export type MetaPerson = {
+  name: string;
+  role?: string;
+  photo?: string;
+  tmdbId?: number;
+};
+export type MetaTrailer = {
+  id: string;
+  key: string;
+  name: string;
+  site: string;
+  trailerType: string;
+  official?: boolean;
+  publishedAt?: string;
+  seasonNumber?: number;
+};
 export type ExternalRating = { source: string; value: number };
 
 export type ContentMeta = {
@@ -135,17 +149,99 @@ export type ContentMeta = {
 };
 
 export type LibraryItem = ContentMeta & { addedAt: number };
-export type ResumePoint = { contentId: string; contentType: string; videoId: string; season?: number; episode?: number; positionMs: number; durationMs: number; lastWatched: number };
-export type WatchedItem = { contentId: string; contentType: string; title: string; season?: number; episode?: number; watchedAt: number };
-export type ProgressSnapshot = { entries: ResumePoint[]; watchedItems: WatchedItem[] };
+export type ResumePoint = {
+  contentId: string;
+  contentType: string;
+  videoId: string;
+  season?: number;
+  episode?: number;
+  positionMs: number;
+  durationMs: number;
+  lastWatched: number;
+};
+export type WatchedItem = {
+  contentId: string;
+  contentType: string;
+  title: string;
+  season?: number;
+  episode?: number;
+  watchedAt: number;
+};
+export type ProgressSnapshot = {
+  entries: ResumePoint[];
+  watchedItems: WatchedItem[];
+};
 
-export type CollectionCatalogSource = { addonId: string; type: string; catalogId: string; genre?: string };
-export type CollectionSource = { provider: string; addonId?: string; type?: string; catalogId?: string; genre?: string; tmdbSourceType?: string; title?: string; tmdbId?: number; traktListId?: number; mediaType?: string };
-export type CollectionFolder = { id: string; title: string; coverImageUrl?: string; focusGifUrl?: string; focusGifEnabled: boolean; coverEmoji?: string; tileShape: string; hideTitle: boolean; sources: CollectionSource[]; catalogSources: CollectionCatalogSource[]; heroBackdropUrl?: string; heroVideoUrl?: string; titleLogoUrl?: string };
-export type NuvioCollection = { id: string; title: string; backdropImageUrl?: string; pinToTop: boolean; viewMode: string; showAllTab: boolean; folders: CollectionFolder[] };
+export type CollectionCatalogSource = {
+  addonId: string;
+  type: string;
+  catalogId: string;
+  genre?: string;
+};
+export type CollectionSource = {
+  provider: string;
+  addonId?: string;
+  type?: string;
+  catalogId?: string;
+  genre?: string;
+  tmdbSourceType?: string;
+  title?: string;
+  tmdbId?: number;
+  traktListId?: number;
+  mediaType?: string;
+  sortBy?: string;
+  sortHow?: string;
+};
+export type CollectionFolder = {
+  id: string;
+  title: string;
+  coverImageUrl?: string;
+  focusGifUrl?: string;
+  focusGifEnabled: boolean;
+  coverEmoji?: string;
+  tileShape: string;
+  hideTitle: boolean;
+  sources: CollectionSource[];
+  catalogSources: CollectionCatalogSource[];
+  heroBackdropUrl?: string;
+  heroVideoUrl?: string;
+  titleLogoUrl?: string;
+};
+export type NuvioCollection = {
+  id: string;
+  title: string;
+  backdropImageUrl?: string;
+  pinToTop: boolean;
+  viewMode: string;
+  showAllTab: boolean;
+  folders: CollectionFolder[];
+};
+export type AvailableCollectionCatalog = {
+  addonId: string;
+  addonName: string;
+  contentType: string;
+  catalogId: string;
+  catalogName: string;
+  genreOptions: string[];
+  genreRequired: boolean;
+};
+
+export type DiscoverCatalog = {
+  key: string;
+  addonName: string;
+  manifestUrl: string;
+  contentType: string;
+  catalogId: string;
+  catalogName: string;
+  genreOptions: string[];
+  genreRequired: boolean;
+  supportsPagination: boolean;
+};
 
 export type CatalogSection = {
   key: string;
+  /** Nuvio home-layout key (`{manifestId}:{type}:{catalogId}`). */
+  prefKey: string;
   title: string;
   subtitle: string;
   manifestUrl: string;
@@ -155,12 +251,54 @@ export type CatalogSection = {
   items: ContentMeta[];
 };
 
+/** One row of the home page, in the user's configured order. */
+export type HomeLayoutRow = {
+  key: string;
+  isCollection: boolean;
+  collectionId?: string;
+};
+
 export type HomePayload = {
   sections: CatalogSection[];
+  rows: HomeLayoutRow[];
   hero?: ContentMeta;
   heroItems?: ContentMeta[];
   errors: string[];
 };
+
+export type HomeLayoutItem = {
+  key: string;
+  defaultTitle: string;
+  displayTitle: string;
+  customTitle: string;
+  subtitle: string;
+  enabled: boolean;
+  heroSourceEnabled: boolean;
+  order: number;
+  isCollection: boolean;
+  collectionId?: string;
+  pinnedToTop: boolean;
+};
+
+export type HomeLayoutState = {
+  heroEnabled: boolean;
+  showCatalogType: boolean;
+  hideUnreleasedContent: boolean;
+  heroSourceLimit: number;
+  /** Rows kept for addons/collections this device cannot see. */
+  preservedCount: number;
+  items: HomeLayoutItem[];
+};
+
+export type HomeLayoutAction =
+  | { action: "setEnabled"; key: string; enabled: boolean }
+  | { action: "setHeroSourceEnabled"; key: string; enabled: boolean }
+  | { action: "setCustomTitle"; key: string; title: string }
+  | { action: "setHeroEnabled"; enabled: boolean }
+  | { action: "setShowCatalogType"; enabled: boolean }
+  | { action: "setHideUnreleasedContent"; enabled: boolean }
+  | { action: "move"; from: number; to: number }
+  | { action: "reset" };
 
 export type StreamSource = {
   name: string;
@@ -174,13 +312,25 @@ export type StreamSource = {
   addonName: string;
   addonId: string;
   streamType?: string;
-  behaviorHints?: { bingeGroup?: string; videoHash?: string; videoSize?: number; filename?: string; notWebReady: boolean; proxyHeaders?: { request?: Record<string, string>; response?: Record<string, string> } };
+  behaviorHints?: {
+    bingeGroup?: string;
+    videoHash?: string;
+    videoSize?: number;
+    filename?: string;
+    notWebReady: boolean;
+    proxyHeaders?: {
+      request?: Record<string, string>;
+      response?: Record<string, string>;
+    };
+  };
   addonLogo?: string;
 };
 
 export type AddonDescriptor = {
   url: string;
   name: string;
+  /** Manifest version; empty when the addon could not be reached. */
+  version: string;
   enabled: boolean;
   sortOrder: number;
   configurable: boolean;
@@ -203,6 +353,7 @@ export type SettingsSnapshot = {
   subtitleFontSize: number;
   subtitleOutline: boolean;
   reuseLastStream: boolean;
+  reuseLastStreamHours: number;
   autoplayMode: "MANUAL" | "FIRST_STREAM" | "REGEX_MATCH";
   autoplayNextEpisode: boolean;
   skipIntro: boolean;
@@ -210,4 +361,12 @@ export type SettingsSnapshot = {
   showFileSizeBadges: boolean;
   badgePlacement: "TOP" | "BOTTOM";
   episodeReleaseAlerts: boolean;
+  /** Poster card style — synced via features.poster_card_style_settings_payload. */
+  posterWidth: number;
+  posterCornerRadius: number;
+  posterHideLabels: boolean;
+  posterLandscapeCatalogs: boolean;
+  nextEpisodeThresholdMode: "PERCENTAGE" | "MINUTES_BEFORE_END";
+  nextEpisodeThresholdPercent: number;
+  nextEpisodeThresholdMinutes: number;
 };

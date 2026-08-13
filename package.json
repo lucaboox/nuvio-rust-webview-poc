@@ -12,6 +12,7 @@
     "test:shell": "cargo test --manifest-path shell/Cargo.toml"
   },
   "dependencies": {
+    "lucide-react": "^1.31.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
@@ -23,4 +24,3 @@
     "vite": "^7.1.3"
   }
 }
-
