@@ -107,12 +107,12 @@ export function AddonsPage({
           )}
         </div>
         <button
-          className="icon-action"
+          className="icon-action addons-refresh"
           title="Reload addons from your account"
           onClick={onRefresh}
           disabled={loading || busy}
         >
-          <Icon name="refresh" size={19} />
+          <Icon name="refresh" size={22} />
         </button>
       </div>
 

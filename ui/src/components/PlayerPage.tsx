@@ -44,7 +44,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
   const client = useClientSettings();
   const confirmedPosition = useRef(0);
   const pulseTimer = useRef<number | null>(null);
-  const [preview, setPreview] = useState<{ positionMs: number; x: number; image?: string } | null>(null);
+  const [preview, setPreview] = useState<{ positionMs: number; x: number; image?: string; exact: boolean } | null>(null);
   const previewTimer = useRef<number | null>(null);
   // Frames are cached per 10s bucket so scrubbing back over the same stretch
   // costs nothing; a decode is ~100-400ms over the network.
@@ -53,6 +53,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
   const [skipSegments, setSkipSegments] = useState<SkipSegment[]>([]);
   const [dismissedSegment, setDismissedSegment] = useState<string | null>(null);
   const hideTimer = useRef<number | null>(null);
+  const holdControls = useRef(false);
   const volumeTimer = useRef<number | null>(null);
   const lastPointerActivity = useRef(0);
   const controlsVisibleRef = useRef(true);
@@ -88,11 +89,29 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
       setControlsVisible(true);
     }
     if (hideTimer.current != null) window.clearTimeout(hideTimer.current);
+    // Resting the pointer on the seek bar or a menu is interaction even though
+    // it fires no pointermove, so the deck must not fade out from under it.
+    if (holdControls.current) return;
     hideTimer.current = window.setTimeout(() => {
       controlsVisibleRef.current = false;
       setControlsVisible(false);
     }, 2600);
   }, []);
+
+  const beginControlHover = useCallback(() => {
+    holdControls.current = true;
+    if (hideTimer.current != null) window.clearTimeout(hideTimer.current);
+    if (!controlsVisibleRef.current) {
+      controlsVisibleRef.current = true;
+      setControlsVisible(true);
+    }
+  }, []);
+
+  const endControlHover = useCallback(() => {
+    holdControls.current = false;
+    lastPointerActivity.current = 0;
+    revealControls();
+  }, [revealControls]);
 
   useEffect(() => {
     let live = true;
@@ -333,12 +352,27 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
 
   const PREVIEW_BUCKET_MS = 10_000;
 
+  /** Closest already-decoded frame, so a pending capture has something to show
+   *  instead of an empty box — a wrong-but-near frame beats a spinner. */
+  function nearestCached(bucket: number): string | undefined {
+    let best: string | undefined;
+    let bestGap = Infinity;
+    for (const [key, image] of previewCache.current) {
+      const gap = Math.abs(key - bucket);
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = image;
+      }
+    }
+    return best;
+  }
+
   function requestPreview(positionMs: number, x: number) {
     if (!client.seekThumbnails || state.durationMs <= 0) return;
     const bucket = Math.round(positionMs / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
-    const cached = previewCache.current.get(bucket);
-    setPreview({ positionMs, x, image: cached });
-    if (cached) return;
+    const exact = previewCache.current.get(bucket);
+    setPreview({ positionMs, x, image: exact ?? nearestCached(bucket), exact: !!exact });
+    if (exact) return;
     if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
     previewTimer.current = window.setTimeout(() => {
       invoke<{ image: string }>("player.thumbnail", { positionMs: bucket })
@@ -347,7 +381,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
           // Only apply if the pointer is still near where it was asked for.
           setPreview((current) =>
             current && Math.abs(current.positionMs - positionMs) < PREVIEW_BUCKET_MS
-              ? { ...current, image: result.image }
+              ? { ...current, image: result.image, exact: true }
               : current,
           );
         })
@@ -402,6 +436,14 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
           ? { backgroundImage: `url("${playback.context.backdrop.replaceAll('"', "%22")}")` }
           : undefined}
       >
+        <button
+          className="player-glyph player-cover-back"
+          title="Back to details"
+          aria-label="Back to details"
+          onClick={leave}
+        >
+          <Icon name="back" size={26} />
+        </button>
         <div className="player-startup-inner">
           {playback.context.logo && !state.error ? (
             <img className="player-startup-logo" src={playback.context.logo} alt={playback.title} />
@@ -435,7 +477,11 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     {seekBusy && !state.loading && !state.error && (
       <div className="player-seek-busy" role="status"><i className="loading-spinner" /></div>
     )}
-    <header className="player-overlay-header">
+    <header
+      className="player-overlay-header"
+      onPointerEnter={beginControlHover}
+      onPointerLeave={endControlHover}
+    >
       <button className="player-glyph player-back" title="Back to details" aria-label="Back to details" onClick={leave}><Icon name="back" size={30} /></button>
       <div className="player-title"><span>{episodeLabel(playback.context)}</span><strong>{playback.title}</strong></div>
       <div className="player-header-right">
@@ -444,15 +490,20 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
       </div>
     </header>
     {showSkip && <button className="player-skip-prompt" onClick={skipActiveSegment}><Icon name="forward" size={21} /><span>{skipLabel(activeSkipSegment.type)}</span></button>}
-    <section className="player-control-deck">
+    <section
+      className="player-control-deck"
+      onPointerEnter={beginControlHover}
+      onPointerLeave={endControlHover}
+    >
       <div className="player-timeline-row">
         <span>{formatTime(state.positionMs)}</span>
         <div className="player-seek-wrap">
           {preview && (
             <div className="player-seek-preview" style={{ left: `${preview.x}px` }}>
-              {preview.image
-                ? <img src={preview.image} alt="" />
-                : <div className="player-seek-preview-pending"><i className="loading-spinner" /></div>}
+              <div className="player-seek-preview-frame">
+                {preview.image && <img className={preview.exact ? undefined : "is-stale"} src={preview.image} alt="" />}
+                {!preview.exact && <i className="loading-spinner" />}
+              </div>
               <span>{formatTime(preview.positionMs)}</span>
             </div>
           )}

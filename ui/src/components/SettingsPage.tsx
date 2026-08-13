@@ -294,6 +294,8 @@ export function SettingsPage({
   );
 }
 
+const CHIP_LIMIT = 6;
+
 function SettingRow({
   setting,
   value,
@@ -331,21 +333,43 @@ function SettingRow({
         </label>
       )}
 
-      {control.kind === "preset" && (
-        <div className="preset-chips">
-          {control.options.map(([label, option]) => (
-            <button
-              key={String(option)}
-              className={option === value ? "active" : undefined}
-              aria-pressed={option === value}
-              disabled={busy}
-              onClick={() => onChange(option)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
+      {control.kind === "preset" &&
+        // Chips only read well while they fit on one line. Longer sets (the
+        // language lists) become a dropdown rather than wrapping to two rows.
+        (control.options.length > CHIP_LIMIT ? (
+          <select
+            className="setting-select"
+            aria-label={setting.label}
+            value={String(value ?? "")}
+            disabled={busy}
+            onChange={(event) => {
+              const picked = control.options.find(
+                ([, option]) => String(option) === event.target.value,
+              );
+              if (picked) onChange(picked[1]);
+            }}
+          >
+            {control.options.map(([label, option]) => (
+              <option key={String(option)} value={String(option)}>
+                {label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="preset-chips">
+            {control.options.map(([label, option]) => (
+              <button
+                key={String(option)}
+                className={option === value ? "active" : undefined}
+                aria-pressed={option === value}
+                disabled={busy}
+                onClick={() => onChange(option)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ))}
 
       {control.kind === "number" && (
         <div className="poster-size-control">

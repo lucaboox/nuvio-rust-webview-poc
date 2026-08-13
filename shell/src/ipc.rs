@@ -93,7 +93,12 @@ pub fn handle_content_shared(
                         request.id,
                         json!({ "image": format!("data:image/jpeg;base64,{}", base64(&bytes)) }),
                     ),
-                    Err(error) => failure(request.id, "thumbnail_failed", error.to_string()),
+                    Err(error) => {
+                        // Otherwise a broken thumbnailer is completely silent:
+                        // the UI drops the preview and shows nothing.
+                        eprintln!("seek thumbnail failed at {position_ms}ms: {error:#}");
+                        failure(request.id, "thumbnail_failed", error.to_string())
+                    }
                 }
             }
             _ => failure(
