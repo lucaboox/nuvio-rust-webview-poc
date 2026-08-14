@@ -39,6 +39,21 @@ pub enum OutboundMessage {
     Event(EventEnvelope),
 }
 
+/// Release notes are public GitHub data and do not need the global account
+/// lock. Keeping this request independent also means a slow GitHub response
+/// cannot hold up player or download state.
+pub fn handle_updates_shared(raw: &str) -> Option<Vec<OutboundMessage>> {
+    let request = serde_json::from_str::<RequestEnvelope>(raw).ok()?;
+    if request.method != "updates.changelog" {
+        return None;
+    }
+    let response = match crate::updates::github_release_notes() {
+        Ok(releases) => success(request.id, json!({ "releases": releases })),
+        Err(error) => failure(request.id, "changelog_load_failed", error.to_string()),
+    };
+    Some(vec![OutboundMessage::Response(response)])
+}
+
 /// Player controls use their own lock and bypass account/content work. This
 /// keeps seek, volume, pause, and track selection responsive while an unrelated
 /// Supabase or addon request is in flight.

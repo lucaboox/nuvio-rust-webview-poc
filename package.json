@@ -12,6 +12,7 @@
     "dev": "npm run prepare:runtime && npm run build:ui && cargo run --manifest-path shell/Cargo.toml",
     "tauri": "tauri",
     "bundle": "tauri build --config shell/tauri.conf.json",
+    "release:notes": "node scripts/release-notes.mjs",
     "version:set": "node scripts/set-version.mjs",
     "test:shell": "npm run prepare:runtime && npm run build:ui && cargo test --manifest-path shell/Cargo.toml"
   },

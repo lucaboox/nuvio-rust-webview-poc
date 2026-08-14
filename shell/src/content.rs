@@ -187,11 +187,13 @@ pub struct MetaTrailer {
     pub name: String,
     #[serde(default)]
     pub site: String,
-    #[serde(default, rename = "type")]
+    pub size: Option<i64>,
+    #[serde(default, rename = "trailerType", alias = "type")]
     pub trailer_type: String,
     pub official: Option<bool>,
     pub published_at: Option<String>,
     pub season_number: Option<i64>,
+    pub display_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1424,12 +1426,15 @@ fn parse_trailers(value: &Value) -> Vec<MetaTrailer> {
                 key,
                 name: value_string(item, "name").unwrap_or_else(|| "Trailer".to_string()),
                 site: value_string(item, "site").unwrap_or_else(|| "YouTube".to_string()),
+                size: value_i64(item, "size"),
                 trailer_type: value_string(item, "type").unwrap_or_else(|| "Trailer".to_string()),
                 official: item.get("official").and_then(Value::as_bool),
                 published_at: value_string(item, "publishedAt")
                     .or_else(|| value_string(item, "published_at")),
                 season_number: value_i64(item, "seasonNumber")
                     .or_else(|| value_i64(item, "season_number")),
+                display_name: value_string(item, "displayName")
+                    .or_else(|| value_string(item, "display_name")),
             })
         })
         .collect()
@@ -1857,6 +1862,38 @@ mod tests {
             vec!["One", "Two"]
         );
         assert_eq!(meta.videos[0].season, Some(1));
+    }
+
+    #[test]
+    fn trailer_categories_survive_the_frontend_bridge() {
+        let meta = parse_meta(&serde_json::json!({
+            "id": "tt123",
+            "type": "movie",
+            "name": "Example",
+            "trailers": [
+                { "key": "trailer-key", "name": "Official Trailer", "type": "Trailer" },
+                {
+                    "key": "featurette-key",
+                    "name": "Making the Movie",
+                    "type": "Behind the Scenes",
+                    "displayName": "Inside the production",
+                    "size": 1080
+                }
+            ]
+        }))
+        .expect("valid metadata with categorized trailers");
+
+        assert_eq!(meta.trailers[0].trailer_type, "Trailer");
+        assert_eq!(meta.trailers[1].trailer_type, "Behind the Scenes");
+        assert_eq!(
+            meta.trailers[1].display_name.as_deref(),
+            Some("Inside the production")
+        );
+        assert_eq!(meta.trailers[1].size, Some(1080));
+
+        let bridge_value = serde_json::to_value(&meta.trailers[1]).unwrap();
+        assert_eq!(bridge_value["trailerType"], "Behind the Scenes");
+        assert!(bridge_value.get("type").is_none());
     }
 
     #[test]

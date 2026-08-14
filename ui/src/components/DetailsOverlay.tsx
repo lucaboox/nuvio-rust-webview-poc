@@ -286,6 +286,23 @@ function DetailsDescription({ text, onExpand }: { text: string; onExpand(): void
  *  site, which cannot be embedded from a thumbnail key alone. */
 function TrailerModal({ trailers, onClose }: { trailers: MetaTrailer[]; onClose(): void }) {
   const [active, setActive] = useState<MetaTrailer | null>(null);
+  const grouped = useMemo(() => {
+    const categories = new Map<string, MetaTrailer[]>();
+    for (const trailer of trailers) {
+      const category = trailer.trailerType?.trim() || "Trailer";
+      const items = categories.get(category) ?? [];
+      items.push(trailer);
+      categories.set(category, items);
+    }
+    return categories;
+  }, [trailers]);
+  const categories = [...grouped.entries()];
+  const initialCategory = categories.find(([category]) => category.toLowerCase() === "trailer")?.[0]
+    ?? categories[0]?.[0]
+    ?? "Trailer";
+  const [selectedCategory, setSelectedCategory] = useState(initialCategory);
+  const effectiveCategory = grouped.has(selectedCategory) ? selectedCategory : initialCategory;
+  const visible = grouped.get(effectiveCategory) ?? [];
   const embeddable = (trailer: MetaTrailer) =>
     !trailer.site || trailer.site.toLowerCase() === "youtube";
 
@@ -307,7 +324,7 @@ function TrailerModal({ trailers, onClose }: { trailers: MetaTrailer[]; onClose(
 
   return (
     <DetailsModal
-      title={active ? active.name : "Trailers & extras"}
+      title={active ? active.displayName || active.name : "Trailers & extras"}
       onClose={onClose}
       onBack={active ? () => setActive(null) : undefined}
       className={active ? "trailer-viewer-modal" : undefined}
@@ -318,7 +335,7 @@ function TrailerModal({ trailers, onClose }: { trailers: MetaTrailer[]; onClose(
             <iframe
               key={active.key}
               src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(active.key)}?autoplay=1&controls=1&rel=0&playsinline=1&fs=1`}
-              title={active.name}
+              title={active.displayName || active.name}
               allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
               referrerPolicy="strict-origin-when-cross-origin"
               allowFullScreen
@@ -338,8 +355,18 @@ function TrailerModal({ trailers, onClose }: { trailers: MetaTrailer[]; onClose(
           </div>
         </div>
       ) : (
-        <div className="trailer-grid">
-          {trailers.map((trailer) => (
+        <div className="trailer-browser">
+          <label className="trailer-category-select">
+            <span>Category</span>
+            <span className="trailer-category-control">
+              <select value={effectiveCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
+                {categories.map(([category, items]) => <option value={category} key={category}>{category} ({items.length})</option>)}
+              </select>
+              <Icon name="down" size={17} />
+            </span>
+          </label>
+          {visible.length > 0 ? <div className="trailer-grid">
+          {visible.map((trailer) => (
             <button
               key={trailer.id || trailer.key}
               title={embeddable(trailer) ? "Play here" : "Open in your browser"}
@@ -358,13 +385,14 @@ function TrailerModal({ trailers, onClose }: { trailers: MetaTrailer[]; onClose(
                   <Icon name="play" size={18} />
                 </i>
               </span>
-              <strong>{trailer.name}</strong>
+              <strong>{trailer.displayName || trailer.name}</strong>
               <span className="trailer-meta">
                 {trailer.site || "YouTube"}
                 {trailer.trailerType ? ` · ${trailer.trailerType}` : ""}
               </span>
             </button>
           ))}
+          </div> : <div className="trailer-empty">No videos are available in this category.</div>}
         </div>
       )}
     </DetailsModal>
