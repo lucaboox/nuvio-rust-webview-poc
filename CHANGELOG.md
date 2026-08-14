@@ -4,9 +4,12 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-08-14
+
 - Added optional self-hosted Nuvio backend configuration at sign-in.
 - Added download storage cleanup for empty show folders and orphaned artwork.
 - Grouped trailers and extras using the video categories supplied by metadata addons.
+- Added an in-app release history sourced from the bundled changelog with GitHub Release notes as a fallback.
 
 ## [0.1.0-alpha.2] - 2026-08-14
 
