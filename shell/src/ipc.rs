@@ -61,6 +61,122 @@ pub fn handle_player_shared(
     Some(vec![OutboundMessage::Response(response)])
 }
 
+/// Download state has its own lock because transfers continue while account
+/// and catalog calls run. The UI polls this lightweight snapshot for progress.
+pub fn handle_downloads_shared(
+    raw: &str,
+    shared_state: &Arc<Mutex<AppState>>,
+) -> Option<Vec<OutboundMessage>> {
+    let request = serde_json::from_str::<RequestEnvelope>(raw).ok()?;
+    if !request.method.starts_with("downloads.") {
+        return None;
+    }
+    let downloads = Arc::clone(&shared_state.lock().ok()?.downloads);
+    let id = request.id.clone();
+    let response = match request.method.as_str() {
+        "downloads.list" => match downloads.lock() {
+            Ok(state) => success(id, json!({ "root": state.root(), "items": state.items() })),
+            Err(_) => failure(
+                id,
+                "downloads_unavailable",
+                "Download manager is unavailable".to_string(),
+            ),
+        },
+        "downloads.enqueue" => {
+            let parsed = request.params.get("request").cloned().and_then(|value| {
+                serde_json::from_value::<crate::downloads::DownloadRequest>(value).ok()
+            });
+            match parsed {
+                Some(item) => match crate::downloads::enqueue(&downloads, item) {
+                    Ok(item) => success(id, json!({ "item": item })),
+                    Err(error) => failure(id, "download_rejected", error.to_string()),
+                },
+                None => failure(
+                    id,
+                    "invalid_params",
+                    "Download request is required".to_string(),
+                ),
+            }
+        }
+        "downloads.cancel" => match string_param(&request.params, "id") {
+            Some(item_id) => match downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Download manager is unavailable"))
+                .and_then(|mut state| state.cancel(item_id))
+            {
+                Ok(()) => success(id, json!({ "cancelled": true })),
+                Err(error) => failure(id, "download_cancel_failed", error.to_string()),
+            },
+            None => failure(id, "invalid_params", "Download id is required".to_string()),
+        },
+        "downloads.remove" => match string_param(&request.params, "id") {
+            Some(item_id) => match downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Download manager is unavailable"))
+                .and_then(|mut state| state.remove(item_id))
+            {
+                Ok(()) => success(id, json!({ "removed": true })),
+                Err(error) => failure(id, "download_remove_failed", error.to_string()),
+            },
+            None => failure(id, "invalid_params", "Download id is required".to_string()),
+        },
+        "downloads.retry" => match string_param(&request.params, "id") {
+            Some(item_id) => match crate::downloads::retry(&downloads, item_id) {
+                Ok(()) => success(id, json!({ "queued": true })),
+                Err(error) => failure(id, "download_retry_failed", error.to_string()),
+            },
+            None => failure(id, "invalid_params", "Download id is required".to_string()),
+        },
+        "downloads.moveStorage" => match string_param(&request.params, "path") {
+            Some(path) => match downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Download manager is unavailable"))
+                .and_then(|mut state| state.move_storage(std::path::Path::new(path)))
+            {
+                Ok(()) => success(id, json!({ "moved": true })),
+                Err(error) => failure(id, "download_move_failed", error.to_string()),
+            },
+            None => failure(
+                id,
+                "invalid_params",
+                "A destination folder is required".to_string(),
+            ),
+        },
+        "downloads.artwork" => match string_param(&request.params, "id") {
+            Some(item_id) => match downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Download manager is unavailable"))
+                .and_then(|state| state.artwork(item_id))
+            {
+                Ok(Some((bytes, mime))) => success(
+                    id,
+                    json!({ "image": format!("data:{mime};base64,{}", base64(&bytes)) }),
+                ),
+                Ok(None) => success(id, json!({ "image": Value::Null })),
+                Err(error) => failure(id, "download_artwork_failed", error.to_string()),
+            },
+            None => failure(id, "invalid_params", "Download id is required".to_string()),
+        },
+        "downloads.openFolder" => {
+            let root = downloads.lock().ok().map(|state| state.root());
+            match root.and_then(|path| open::that(path).ok()) {
+                Some(()) => success(id, json!({ "opened": true })),
+                None => failure(
+                    id,
+                    "download_folder_failed",
+                    "Could not open the download folder".to_string(),
+                ),
+            }
+        }
+        _ => failure(
+            id,
+            "method_not_found",
+            format!("Unknown native method: {}", request.method),
+        ),
+    };
+    Some(vec![OutboundMessage::Response(response)])
+}
+
 fn handle_player_command(
     request: &RequestEnvelope,
     player: &mut crate::player::PlayerService,
@@ -144,8 +260,16 @@ pub fn handle_content_shared(
             .get("episode")
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let segments = crate::skip_segments::resolve(content_id, video_id, season, episode)
-            .unwrap_or_default();
+        let cached = shared_state.lock().ok().and_then(|state| {
+            state
+                .downloads
+                .lock()
+                .ok()?
+                .cached_segments(content_id, video_id, season, episode)
+        });
+        let segments = cached.unwrap_or_else(|| {
+            crate::skip_segments::resolve(content_id, video_id, season, episode).unwrap_or_default()
+        });
         return Some(vec![OutboundMessage::Response(success(
             request.id,
             json!({ "segments": segments }),
@@ -224,6 +348,36 @@ pub fn handle_content_shared(
                 id,
                 "invalid_params",
                 "Metadata enrichment requires an item".to_string(),
+            ),
+        })]);
+    }
+    if request.method == "content.personDetails" {
+        let person_id = request.params.get("personId").and_then(Value::as_i64);
+        let prefer_crew = request.params.get("preferCrew").and_then(Value::as_bool);
+        let client = match content.lock() {
+            Ok(content) => content.http_client(),
+            Err(_) => {
+                return Some(vec![OutboundMessage::Response(failure(
+                    id,
+                    "content_unavailable",
+                    "The content service lock was interrupted".to_string(),
+                ))]);
+            }
+        };
+        return Some(vec![OutboundMessage::Response(match person_id {
+            Some(person_id) if person_id > 0 => match crate::metadata::fetch_person_detail(
+                &client,
+                person_id,
+                prefer_crew,
+                &metadata_config.tmdb,
+            ) {
+                Ok(person) => success(id, json!(person)),
+                Err(error) => failure(id, "person_details_failed", error.to_string()),
+            },
+            _ => failure(
+                id,
+                "invalid_params",
+                "Person details require a positive TMDB personId".to_string(),
             ),
         })]);
     }
@@ -390,6 +544,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 "profiles": state.profiles,
                 "activeProfileIndex": state.active_profile_index,
                 "addons": state.addons,
+                "settings": state.settings_snapshot,
                 "uptimeMs": state.started_at.elapsed().as_millis(),
             }),
         ),
@@ -447,6 +602,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             state.auth.sign_out();
             state.profiles.clear();
             state.addons.clear();
+            state.settings_snapshot = None;
+            state.settings_blob = None;
+            state.metadata_config = Default::default();
             state.content.lock().unwrap().invalidate();
             state.active_profile_index = 1;
             success(id, account_payload(state, None))
@@ -467,7 +625,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     state.active_profile_index = profile_index;
                     match state.refresh_addons() {
                         Ok(()) => {
-                            state.refresh_metadata();
+                            if let Err(error) = state.refresh_settings() {
+                                eprintln!("profile settings could not be loaded: {error:#}");
+                            }
                             success(id, account_payload(state, None))
                         }
                         Err(error) => failure(id, "profile_load_failed", error.to_string()),
@@ -667,26 +827,43 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 _ => failure(id, "invalid_params", "Invalid addon order".to_string()),
             }
         }
-        "settings.load" => match crate::settings::load(&state.auth, state.active_profile_index) {
-            Ok((settings, _)) => success(id, json!(settings)),
-            Err(error) => failure(id, "settings_load_failed", error.to_string()),
-        },
+        "settings.load" => {
+            if state.settings_snapshot.is_none()
+                && let Err(error) = state.refresh_settings()
+            {
+                failure(id, "settings_load_failed", error.to_string())
+            } else {
+                success(id, json!(state.settings_snapshot))
+            }
+        }
         "settings.update" => {
             let key = string_param(&request.params, "key");
             let value = request.params.get("value").cloned();
             match (key, value) {
-                (Some(key), Some(value)) => match crate::settings::update(
-                    &state.auth,
-                    state.active_profile_index,
-                    key,
-                    value,
-                ) {
-                    Ok(settings) => {
-                        state.refresh_metadata();
-                        success(id, json!(settings))
+                (Some(key), Some(value)) => {
+                    if state.settings_blob.is_none()
+                        && let Err(error) = state.refresh_settings()
+                    {
+                        failure(id, "settings_update_failed", error.to_string())
+                    } else {
+                        let blob = state.settings_blob.clone().unwrap_or_else(|| json!({}));
+                        match crate::settings::update_cached(
+                            &state.auth,
+                            state.active_profile_index,
+                            &blob,
+                            key,
+                            value,
+                        ) {
+                            Ok((settings, blob)) => {
+                                state.settings_snapshot = Some(settings.clone());
+                                state.settings_blob = Some(blob);
+                                state.refresh_metadata();
+                                success(id, json!(settings))
+                            }
+                            Err(error) => failure(id, "settings_update_failed", error.to_string()),
+                        }
                     }
-                    Err(error) => failure(id, "settings_update_failed", error.to_string()),
-                },
+                }
                 _ => failure(
                     id,
                     "invalid_params",
@@ -1146,31 +1323,47 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 .and_then(Value::as_i64)
                 .unwrap_or_default();
             let request_headers = player_request_headers(&request.params);
+            let local_url_allowed = url.as_deref().is_none_or(|value| {
+                !value.starts_with("file:")
+                    || state
+                        .downloads
+                        .lock()
+                        .is_ok_and(|downloads| downloads.contains_play_url(value))
+            });
             let identity = request.params.get("progress").cloned().and_then(|value| {
                 serde_json::from_value::<crate::progress::PlaybackIdentity>(value).ok()
             });
-            match (media_id, identity, request_headers) {
-                (Some(media_id), Some(identity), Ok(request_headers)) => {
+            match (media_id, identity, request_headers, local_url_allowed) {
+                (Some(media_id), Some(identity), Ok(request_headers), true) => {
                     // Captured at prepare time so progress lands on the profile that
                     // started playback, even if the user switches profiles mid-episode.
                     let auth = state.auth.clone();
                     let profile_id = state.active_profile_index;
-                    // Subtitle appearance is read at load time; mpv applies
-                    // these per file, not globally.
-                    let subtitle_style =
+                    // Player settings are already cached during account/profile
+                    // bootstrap. Applying that snapshot avoids a network read on
+                    // every stream start and keeps RTX VSR in sync with the UI.
+                    let player_settings = state.settings_snapshot.clone().or_else(|| {
                         crate::settings::load(&state.auth, state.active_profile_index)
-                            .map(|(snapshot, _)| crate::player::SubtitleStyle {
-                                font_size: snapshot.subtitle_font_size,
-                                bold: snapshot.subtitle_bold,
-                                text_color: snapshot.subtitle_text_color,
-                                background_color: snapshot.subtitle_background_color,
-                                outline_enabled: snapshot.subtitle_outline,
-                                outline_color: snapshot.subtitle_outline_color,
-                                outline_width: snapshot.subtitle_outline_width,
-                                bottom_offset: snapshot.subtitle_bottom_offset,
-                                use_libass: snapshot.use_libass,
-                            })
-                            .unwrap_or_default();
+                            .ok()
+                            .map(|(snapshot, _)| snapshot)
+                    });
+                    let subtitle_style = player_settings
+                        .as_ref()
+                        .map(|snapshot| crate::player::SubtitleStyle {
+                            font_size: snapshot.subtitle_font_size,
+                            bold: snapshot.subtitle_bold,
+                            text_color: snapshot.subtitle_text_color.clone(),
+                            background_color: snapshot.subtitle_background_color.clone(),
+                            outline_enabled: snapshot.subtitle_outline,
+                            outline_color: snapshot.subtitle_outline_color.clone(),
+                            outline_width: snapshot.subtitle_outline_width,
+                            bottom_offset: snapshot.subtitle_bottom_offset,
+                            use_libass: snapshot.use_libass,
+                        })
+                        .unwrap_or_default();
+                    let rtx_super_resolution = player_settings
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.rtx_super_resolution);
                     match state
                         .player
                         .lock()
@@ -1182,6 +1375,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                                 request_headers,
                                 start_position_ms,
                                 subtitle_style,
+                                rtx_super_resolution,
                                 // Fires once, as the playback loop tears down. Progress mid-episode
                                 // is not checkpointed, so a crash loses the session.
                                 Box::new(move |position, duration, reached_eof| {
@@ -1202,7 +1396,12 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                         Err(error) => failure(id, "playback_failed", error.to_string()),
                     }
                 }
-                (_, _, Err(error)) => failure(id, "invalid_params", error.to_string()),
+                (_, _, Err(error), _) => failure(id, "invalid_params", error.to_string()),
+                (_, _, _, false) => failure(
+                    id,
+                    "invalid_params",
+                    "Local playback is limited to completed Nuvio downloads".to_string(),
+                ),
                 _ => failure(
                     id,
                     "invalid_params",
@@ -1352,6 +1551,7 @@ fn account_payload(state: &AppState, warning: Option<String>) -> Value {
         "profiles": state.profiles,
         "activeProfileIndex": state.active_profile_index,
         "addons": state.addons,
+        "settings": state.settings_snapshot,
         "warning": warning,
     })
 }

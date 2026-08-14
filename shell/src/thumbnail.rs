@@ -9,10 +9,13 @@
 //! hundred KB rather than the whole stream.
 
 use std::{
+    collections::{VecDeque, hash_map::DefaultHasher},
     ffi::{CString, c_char, c_void},
     fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     ptr,
+    sync::TryLockError,
     time::{Duration, Instant},
 };
 
@@ -22,6 +25,59 @@ use libloading::Library;
 /// Scrubbing fast can outrun the decoder; one capture at a time keeps the
 /// player's own connection from competing with a queue of stale requests.
 static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reuses frames across player remounts and repeated visits to the same part
+/// of a stream. Only a hash of the (potentially signed) URL and headers is kept
+/// in memory, never the credentials themselves.
+static FRAME_CACHE: std::sync::OnceLock<std::sync::Mutex<ThumbnailCache>> =
+    std::sync::OnceLock::new();
+const FRAME_CACHE_LIMIT: usize = 64;
+
+#[derive(Default)]
+struct ThumbnailCache {
+    frames: VecDeque<(u64, Vec<u8>)>,
+}
+
+impl ThumbnailCache {
+    fn get(&mut self, key: u64) -> Option<Vec<u8>> {
+        let index = self
+            .frames
+            .iter()
+            .position(|(candidate, _)| *candidate == key)?;
+        let frame = self.frames.remove(index)?;
+        let bytes = frame.1.clone();
+        self.frames.push_back(frame);
+        Some(bytes)
+    }
+
+    fn insert(&mut self, key: u64, bytes: Vec<u8>) {
+        if let Some(index) = self
+            .frames
+            .iter()
+            .position(|(candidate, _)| *candidate == key)
+        {
+            self.frames.remove(index);
+        }
+        self.frames.push_back((key, bytes));
+        while self.frames.len() > FRAME_CACHE_LIMIT {
+            self.frames.pop_front();
+        }
+    }
+}
+
+fn cache() -> &'static std::sync::Mutex<ThumbnailCache> {
+    FRAME_CACHE.get_or_init(|| std::sync::Mutex::new(ThumbnailCache::default()))
+}
+
+fn frame_key(url: &str, request_headers: &[String], position_ms: i64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    request_headers.hash(&mut hasher);
+    // The UI asks in ten-second buckets. Normalising here also coalesces any
+    // direct callers that supply a nearby timestamp.
+    (position_ms.max(0) / 10_000).hash(&mut hasher);
+    hasher.finish()
+}
 
 /// libmpv-2.dll pulls in the whole FFmpeg stack, so loading and unloading it
 /// per capture cost more than the decode itself. The path never changes within
@@ -75,9 +131,25 @@ pub fn capture(
     request_headers: &[String],
     position_ms: i64,
 ) -> Result<Vec<u8>> {
-    let _guard = CAPTURE_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("thumbnailer was interrupted"))?;
+    let key = frame_key(url, request_headers, position_ms);
+    if let Ok(mut cache) = cache().lock()
+        && let Some(bytes) = cache.get(key)
+    {
+        return Ok(bytes);
+    }
+
+    // Never let obsolete pointer positions queue for several seconds. The UI
+    // keeps the newest pending bucket and retries it after the active request.
+    let _guard = match CAPTURE_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => bail!("thumbnailer is busy"),
+        Err(TryLockError::Poisoned(_)) => bail!("thumbnailer was interrupted"),
+    };
+    if let Ok(mut cache) = cache().lock()
+        && let Some(bytes) = cache.get(key)
+    {
+        return Ok(bytes);
+    }
     let out_dir = std::env::temp_dir().join(format!(
         "nuvio-thumb-{}-{}",
         std::process::id(),
@@ -90,7 +162,11 @@ pub fn capture(
     let result = capture_into(dll_path, url, request_headers, position_ms, &out_dir);
     let bytes = result.and_then(|()| newest_jpeg(&out_dir));
     let _ = fs::remove_dir_all(&out_dir);
-    bytes
+    let bytes = bytes?;
+    if let Ok(mut cache) = cache().lock() {
+        cache.insert(key, bytes.clone());
+    }
+    Ok(bytes)
 }
 
 fn capture_into(
@@ -237,4 +313,34 @@ fn newest_jpeg(out_dir: &PathBuf) -> Result<Vec<u8>> {
         })
         .context("the thumbnailer produced no frame")?;
     fs::read(entry.path()).context("the thumbnail frame could not be read")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_key;
+
+    #[test]
+    fn frame_keys_coalesce_the_same_ten_second_bucket() {
+        let headers = vec!["Authorization: token".to_string()];
+        assert_eq!(
+            frame_key("https://example/video", &headers, 20_001),
+            frame_key("https://example/video", &headers, 29_999)
+        );
+        assert_ne!(
+            frame_key("https://example/video", &headers, 20_001),
+            frame_key("https://example/video", &headers, 30_000)
+        );
+    }
+
+    #[test]
+    fn frame_keys_include_source_and_headers() {
+        assert_ne!(
+            frame_key("https://example/one", &[], 0),
+            frame_key("https://example/two", &[], 0)
+        );
+        assert_ne!(
+            frame_key("https://example/one", &[], 0),
+            frame_key("https://example/one", &["Range: one".to_string()], 0)
+        );
+    }
 }

@@ -28,6 +28,7 @@ export type BootstrapResult = {
   profiles: NuvioProfile[];
   activeProfileIndex: number;
   addons: AddonRow[];
+  settings?: SettingsSnapshot | null;
   player: {
     backend: string;
     directMpvReady: boolean;
@@ -79,6 +80,7 @@ export type AccountPayload = {
   profiles: NuvioProfile[];
   activeProfileIndex: number;
   addons: AddonRow[];
+  settings?: SettingsSnapshot | null;
   warning?: string;
 };
 
@@ -100,6 +102,29 @@ export type MetaPerson = {
   role?: string;
   photo?: string;
   tmdbId?: number;
+};
+export type PersonCredit = {
+  id: string;
+  contentType: string;
+  name: string;
+  poster: string;
+  background?: string;
+  description?: string;
+  releaseInfo?: string;
+  rawReleaseDate?: string;
+  popularity?: number;
+};
+export type PersonDetail = {
+  tmdbId: number;
+  name: string;
+  biography?: string;
+  birthday?: string;
+  deathday?: string;
+  placeOfBirth?: string;
+  profilePhoto?: string;
+  knownFor?: string;
+  movieCredits: PersonCredit[];
+  tvCredits: PersonCredit[];
 };
 export type MetaTrailer = {
   id: string;
@@ -326,6 +351,39 @@ export type StreamSource = {
   addonLogo?: string;
 };
 
+export type SkipSegment = {
+  startMs: number;
+  endMs: number;
+  type: string;
+  provider: string;
+};
+
+export type DownloadItem = {
+  id: string;
+  contentId: string;
+  contentType: string;
+  videoId: string;
+  title: string;
+  showName?: string;
+  season?: number;
+  episode?: number;
+  sourceName: string;
+  status: "queued" | "downloading" | "completed" | "failed" | "cancelled";
+  bytesDownloaded: number;
+  totalBytes?: number;
+  filePath?: string;
+  playUrl?: string;
+  artworkCached: boolean;
+  error?: string;
+  createdAt: number;
+  skipSegments: SkipSegment[];
+};
+
+export type DownloadsSnapshot = {
+  root: string;
+  items: DownloadItem[];
+};
+
 export type AddonDescriptor = {
   url: string;
   name: string;
@@ -383,6 +441,8 @@ export type SettingsSnapshot = {
   useLibass: boolean;
   // Autoplay
   autoplaySource: string;
+  autoplaySelectedAddons: string[];
+  autoplaySelectedPlugins: string[];
   autoplayRegex: string;
   autoplayTimeoutSeconds: number;
   autoplayPreferBingeGroup: boolean;

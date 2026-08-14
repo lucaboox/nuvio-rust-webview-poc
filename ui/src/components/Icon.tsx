@@ -1,9 +1,9 @@
 import {
-  Compass, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
+  Compass, Download, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
   SlidersHorizontal, type LucideIcon,
 } from "lucide-react";
 
-type IconName = "home" | "discover" | "library" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "check" | "video" | "episodes" | "sources" | "eye";
+type IconName = "home" | "discover" | "library" | "downloads" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "check" | "video" | "episodes" | "sources" | "eye";
 
 /**
  * Icons sourced from Lucide, whose 24x24 / round-cap style this set already
@@ -16,6 +16,7 @@ const lucide: Partial<Record<IconName, LucideIcon>> = {
   home: House,
   discover: Compass,
   library: Library,
+  downloads: Download,
   addons: Puzzle,
   settings: SlidersHorizontal,
   play: Play,
@@ -26,6 +27,7 @@ const paths: Record<IconName, React.ReactNode> = {
   home: <><path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9"/><path d="M9 20v-6h6v6"/></>,
   discover: <><circle cx="12" cy="12" r="9"/><path d="m16 8-2.4 5.6L8 16l2.4-5.6L16 8Z"/><circle cx="12" cy="12" r=".8" fill="currentColor" stroke="none"/></>,
   library: <><path d="M4 4.5v15"/><path d="M8.5 6.5v13"/><path d="M13 4.5v15"/><path d="m16.9 5.6 3.9 13.6"/></>,
+  downloads: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></>,
   collections: <><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1.5"/><rect x="3.5" y="14" width="7" height="6" rx="1.5"/><rect x="13.5" y="14" width="7" height="6" rx="1.5"/></>,
   addons: <path d="M6.5 6h3.3a2.2 2.2 0 1 1 4.4 0h3.3a1 1 0 0 1 1 1v3.3a2.2 2.2 0 1 0 0 4.4V18a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1v-3.3a2.2 2.2 0 1 0 0-4.4V7a1 1 0 0 1 1-1Z"/>,
   settings: <><path d="M4 7h8"/><path d="M16.5 7H20"/><path d="M4 17h3.5"/><path d="M12 17h8"/><circle cx="14.2" cy="7" r="2.3"/><circle cx="9.8" cy="17" r="2.3"/></>,

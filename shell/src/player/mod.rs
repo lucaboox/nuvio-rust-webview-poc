@@ -45,6 +45,9 @@ impl Default for SubtitleStyle {
 pub struct PlayerState {
     pub active: bool,
     pub loading: bool,
+    /// True only after libmpv reports a natural end-of-file. Stops, source
+    /// changes and load failures must not trigger next-episode autoplay.
+    pub ended: bool,
     pub paused: bool,
     pub position_ms: i64,
     pub duration_ms: i64,
@@ -54,6 +57,8 @@ pub struct PlayerState {
     pub subtitle_track: i64,
     pub title: String,
     pub error: Option<String>,
+    /// Non-fatal playback degradation, such as RTX VSR being unavailable.
+    pub warning: Option<String>,
     /// Audio and subtitle tracks reported by mpv, for the in-player pickers.
     pub tracks: Vec<PlayerTrack>,
 }
@@ -130,6 +135,7 @@ impl PlayerService {
         request_headers: Vec<String>,
         start_position_ms: i64,
         subtitle_style: SubtitleStyle,
+        rtx_super_resolution: bool,
         on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
         let url = url.ok_or_else(|| {
@@ -138,15 +144,22 @@ impl PlayerService {
             )
         })?;
         let parsed = url::Url::parse(&url).map_err(|_| anyhow::anyhow!("Invalid stream URL"))?;
-        anyhow::ensure!(
-            matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some(),
-            "This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."
-        );
-        anyhow::ensure!(
-            parsed.username().is_empty() && parsed.password().is_none(),
-            "Stream URLs cannot contain embedded credentials"
-        );
-        crate::content::validate_addon_url(&parsed)?;
+        if parsed.scheme() == "file" {
+            let path = parsed
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("Invalid local download path"))?;
+            anyhow::ensure!(path.is_file(), "The downloaded media file is missing");
+        } else {
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some(),
+                "This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."
+            );
+            anyhow::ensure!(
+                parsed.username().is_empty() && parsed.password().is_none(),
+                "Stream URLs cannot contain embedded credentials"
+            );
+            crate::content::validate_addon_url(&parsed)?;
+        }
         anyhow::ensure!(self.parent_hwnd != 0, "main window handle is unavailable");
         self.stop();
         self.prepared_media_id = Some(media_id.clone());
@@ -171,6 +184,7 @@ impl PlayerService {
                 request_headers,
                 start_position_ms,
                 subtitle_style,
+                rtx_super_resolution,
                 Arc::clone(&self.state),
                 on_progress,
             )?);

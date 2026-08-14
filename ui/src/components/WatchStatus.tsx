@@ -109,7 +109,7 @@ export function buildContinueWatching(snapshot: ProgressSnapshot, metadata: Cont
 
 export function WatchStatus({ state }: { state: WatchState | null }) {
   if (!state) return null;
-  return <>{state.watched && <span className="watch-status watched"><Icon name="check" size={24} /></span>}{!state.watched && state.percent != null && <span className="watch-progress-track"><i style={{ width: `${state.percent}%` }} /></span>}</>;
+  return <>{state.watched && <span className="watch-status watched" aria-label="Watched" title="Watched"><Icon name="check" size={20} /></span>}{!state.watched && state.percent != null && <span className="watch-progress-track"><i style={{ width: `${state.percent}%` }} /></span>}</>;
 }
 
 export function remainingLabel(progress?: ResumePoint) {

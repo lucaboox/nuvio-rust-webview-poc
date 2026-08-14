@@ -14,6 +14,7 @@ import type {
   NuvioCollection,
   NuvioProfile,
   LibraryItem,
+  MetaPerson,
   ProgressSnapshot,
   SettingsSnapshot,
   StreamSource,
@@ -46,12 +47,17 @@ import { TooltipLayer } from "../components/Tooltip";
 import { posterCardStyle, posterStyleVars } from "../data/posterSize";
 import { primeLibrary, resetLibraryCache } from "../data/libraryCache";
 import { DiscoverPage } from "../components/DiscoverPage";
+import { DownloadsPage } from "../components/DownloadsPage";
+import { PersonPage } from "../components/PersonPage";
 import { clearRecentSearches, forgetSearch, readRecentSearches, rememberSearch } from "../data/recentSearches";
+import { saveBingeGroup } from "../data/bingeGroupCache";
+import { contentKey, saveStreamLink } from "../data/streamLinkCache";
 
 const navItems = [
   ["Home", "home"],
   ["Discover", "discover"],
   ["Library", "library"],
+  ["Downloads", "downloads"],
   ["Addons", "addons"],
   ["Settings", "settings"],
 ] as const;
@@ -83,6 +89,9 @@ export function App() {
   const [catalogView, setCatalogView] = useState<CatalogSection | null>(null);
   const [catalogReturnNav, setCatalogReturnNav] = useState("Home");
   const [detailsReturnNav, setDetailsReturnNav] = useState("Home");
+  const [selectedPerson, setSelectedPerson] = useState<MetaPerson | null>(null);
+  const [personReturnNav, setPersonReturnNav] = useState("Home");
+  const [personReturnDetails, setPersonReturnDetails] = useState<ContentMeta | null>(null);
   const [autoOpenSources, setAutoOpenSources] = useState(false);
   const [recent, setRecent] = useState<string[]>(() => readRecentSearches());
   const [searchOpen, setSearchOpen] = useState(false);
@@ -121,6 +130,7 @@ export function App() {
         setProfiles(result.profiles);
         setActiveProfileIndex(result.activeProfileIndex);
         setAddons(result.addons);
+        setAppSettings(result.settings ?? null);
         setBridgeStatus(`Rust ↔ JS · protocol v${result.protocolVersion}`);
       })
       .catch((error: Error) => setBridgeStatus(error.message));
@@ -146,13 +156,6 @@ export function App() {
       .catch((error: Error) => setContentError(error.message))
       .finally(() => setContentBusy(false));
   }, [auth.status, activeProfileIndex, addonSignature, contentRevision]);
-
-  useEffect(() => {
-    if (auth.status === "authenticated")
-      invoke<SettingsSnapshot>("settings.load")
-        .then(setAppSettings)
-        .catch(() => undefined);
-  }, [auth.status, activeProfileIndex]);
 
   useEffect(() => {
     if (auth.status !== "authenticated") {
@@ -315,6 +318,7 @@ export function App() {
     setProfiles(payload.profiles);
     setActiveProfileIndex(payload.activeProfileIndex);
     setAddons(payload.addons);
+    setAppSettings(payload.settings ?? null);
     setNotice(payload.warning ?? null);
     setContentRevision((revision) => revision + 1);
   }
@@ -369,7 +373,20 @@ export function App() {
     }
   }
   async function preparePlayback(stream: StreamSource, context: PlayContext) {
-    setActivePlayback({ title: context.title, context });
+    setActivePlayback({ title: context.title, context, stream });
+    if (!context.offline) {
+      saveStreamLink(
+        contentKey(
+          context.contentType,
+          context.videoId,
+          context.contentId,
+          context.season,
+          context.episode,
+        ),
+        stream,
+      );
+      saveBingeGroup(context.contentId, stream.behaviorHints?.bingeGroup);
+    }
     try {
       const result = await invoke<{ status: string }>("player.prepare", {
         mediaId: context.title,
@@ -393,14 +410,18 @@ export function App() {
       );
     }
   }
-  function playEpisode(video: Video) {
+  async function playEpisode(video: Video, stream: StreamSource) {
     const context = activePlayback?.context;
     if (!context) return;
-    const seed = selected ?? null;
-    setActivePlayback(null);
     setProgressRevision((revision) => revision + 1);
-    if (!seed) return;
-    openDetails({ ...seed, selectedVideoId: video.id }, true);
+    await preparePlayback(stream, {
+      ...context,
+      title: video.title || context.showName || context.title,
+      startPositionMs: 0,
+      videoId: video.id,
+      season: video.season,
+      episode: video.episode,
+    });
   }
   function leavePlayback() {
     setActivePlayback(null);
@@ -448,6 +469,18 @@ export function App() {
     setSelected(null);
     setActiveNav(detailsReturnNav);
   }
+  function openPerson(person: MetaPerson) {
+    if (!person.tmdbId) return;
+    setPersonReturnNav(activeNav === "Person" ? "Home" : activeNav);
+    setPersonReturnDetails(activeNav === "Details" ? selected : null);
+    setSelectedPerson(person);
+    setActiveNav("Person");
+  }
+  function leavePerson() {
+    if (personReturnNav === "Details") setSelected(personReturnDetails);
+    setSelectedPerson(null);
+    setActiveNav(personReturnNav);
+  }
   function openCollectionFolder(
     collection: NuvioCollection,
     folder: CollectionFolder,
@@ -482,6 +515,7 @@ export function App() {
       <>
         <PlayerPage
           playback={activePlayback}
+          progress={progress}
           amoled={amoled}
           settings={appSettings}
           onBack={leavePlayback}
@@ -642,6 +676,7 @@ export function App() {
           ) : activeNav === "Settings" ? (
             <SettingsPage
               profileIndex={activeProfileIndex}
+              settings={appSettings}
               collections={collections}
               availableCatalogs={availableCollectionCatalogs}
               collectionsLoading={collectionsBusy}
@@ -681,6 +716,8 @@ export function App() {
               progress={progress}
               onSelect={openDetails}
             />
+          ) : activeNav === "Downloads" ? (
+            <DownloadsPage onPlay={preparePlayback} />
           ) : activeNav === "CollectionFolder" && collectionFolder ? (
             <CollectionFolderPage
               {...collectionFolder}
@@ -697,8 +734,16 @@ export function App() {
               autoOpenSources={autoOpenSources}
               onBack={leaveDetails}
               onPlay={preparePlayback}
+              onPersonSelect={openPerson}
               onLibraryChange={() => setLibraryRevision((value) => value + 1)}
               onProgressChanged={() => setProgressRevision((value) => value + 1)}
+            />
+          ) : activeNav === "Person" && selectedPerson ? (
+            <PersonPage
+              seed={selectedPerson}
+              progress={progress}
+              onBack={leavePerson}
+              onSelect={openDetails}
             />
           ) : activeNav === "Home" ? (
             <ContentPage

@@ -47,7 +47,10 @@ export function DiscoverPage({
   }, [addonSignature]);
 
   const types = useMemo(
-    () => [...new Set((catalogs ?? []).map((item) => item.contentType))].sort(),
+    // `catalogs` already follows installed-addon priority and each manifest's
+    // catalog order. Set preserves that first-seen order; sorting here made the
+    // picker disagree with Nuvio and the user's addon configuration.
+    () => [...new Set((catalogs ?? []).map((item) => item.contentType))],
     [catalogs],
   );
   const activeType = type ?? types[0] ?? null;
@@ -206,7 +209,7 @@ export function DiscoverPage({
           >
             {typeCatalogs.map((option) => (
               <option key={option.key} value={option.key}>
-                {option.catalogName} · {option.addonName}
+                {option.catalogName}
               </option>
             ))}
           </select>

@@ -176,6 +176,7 @@ pub fn launch(
     request_headers: Vec<String>,
     start_position_ms: i64,
     subtitle_style: SubtitleStyle,
+    rtx_super_resolution: bool,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
 ) -> Result<PlayerRuntime> {
@@ -191,6 +192,7 @@ pub fn launch(
                 &request_headers,
                 start_position_ms,
                 &subtitle_style,
+                rtx_super_resolution,
                 &state,
                 player_commands,
                 on_progress,
@@ -243,6 +245,7 @@ fn run_player(
     request_headers: &[String],
     start_position_ms: i64,
     subtitle_style: &SubtitleStyle,
+    rtx_super_resolution: bool,
     state: &Arc<Mutex<PlayerState>>,
     commands: PlayerCommands,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
@@ -297,8 +300,12 @@ fn run_player(
         set_option(mpv_set_option_string, handle, "video-align-x", "0")?;
         set_option(mpv_set_option_string, handle, "video-align-y", "0")?;
         set_option(mpv_set_option_string, handle, "vo", "gpu-next")?;
-        set_option(mpv_set_option_string, handle, "gpu-api", "auto")?;
-        set_option(mpv_set_option_string, handle, "hwdec", "auto")?;
+        if let Some(warning) =
+            configure_video_pipeline(mpv_set_option_string, handle, rtx_super_resolution)?
+            && let Ok(mut current) = state.lock()
+        {
+            current.warning = Some(warning);
+        }
         set_option(mpv_set_option_string, handle, "hwdec-codecs", "all")?;
         set_option(
             mpv_set_option_string,
@@ -458,6 +465,9 @@ fn run_player(
                         // Nuvio marks the episode finished.
                         if !end.is_null() && (*end).reason == 0 {
                             reached_eof = true;
+                            if let Ok(mut current) = state.lock() {
+                                current.ended = true;
+                            }
                         }
                         if !end.is_null()
                             && (*end).error < 0
@@ -473,6 +483,7 @@ fn run_player(
                     21 => {
                         if let Ok(mut current) = state.lock() {
                             current.loading = false;
+                            current.ended = false;
                             current.error = None;
                         }
                     }
@@ -716,6 +727,54 @@ unsafe fn set_option(
         Ok(())
     }
 }
+
+/// Applies the same RTX VSR pipeline as Nuvio's native Windows bridge. Older
+/// mpv/FFmpeg builds can lack `d3d11vpp` or NVIDIA's scaling mode, so a rejected
+/// enhancement option is cleared and playback continues through the ordinary
+/// automatic GPU pipeline.
+unsafe fn configure_video_pipeline(
+    function: MpvSetOptionString,
+    handle: *mut c_void,
+    rtx_super_resolution: bool,
+) -> Result<Option<String>> {
+    if !rtx_super_resolution {
+        for (name, value) in video_pipeline_options(false) {
+            unsafe { set_option(function, handle, name, value)? };
+        }
+        return Ok(None);
+    }
+
+    for (name, value) in video_pipeline_options(true) {
+        if let Err(error) = unsafe { set_option(function, handle, name, value) } {
+            eprintln!(
+                "RTX super resolution is unavailable ({error}); continuing with normal GPU playback"
+            );
+            // Best effort cleanup. These reset values are understood by all
+            // libmpv builds supported by this player; failure still should not
+            // turn an optional enhancement into a playback failure.
+            let _ = unsafe { set_option(function, handle, "vf", "") };
+            let _ = unsafe { set_option(function, handle, "gpu-api", "auto") };
+            let _ = unsafe { set_option(function, handle, "hwdec", "auto") };
+            return Ok(Some(
+                "RTX video enhancement is unavailable; using normal GPU playback".to_string(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+fn video_pipeline_options(rtx_super_resolution: bool) -> &'static [(&'static str, &'static str)] {
+    if rtx_super_resolution {
+        &[
+            ("vf", "d3d11vpp=scale=2:scaling-mode=nvidia"),
+            ("gpu-api", "d3d11"),
+            ("hwdec", "d3d11va"),
+            ("d3d11-adapter", "NVIDIA"),
+        ]
+    } else {
+        &[("gpu-api", "auto"), ("hwdec", "auto")]
+    }
+}
 unsafe fn command(function: MpvCommand, handle: *mut c_void, values: &[&str]) -> Result<()> {
     let strings = values
         .iter()
@@ -796,5 +855,22 @@ mod tests {
         mailbox.send(PlayerCommand::Stop).unwrap();
         let commands = mailbox.drain();
         assert!(matches!(commands.as_slice(), [PlayerCommand::Stop]));
+    }
+
+    #[test]
+    fn rtx_pipeline_matches_nuvios_windows_bridge() {
+        assert_eq!(
+            video_pipeline_options(true),
+            &[
+                ("vf", "d3d11vpp=scale=2:scaling-mode=nvidia"),
+                ("gpu-api", "d3d11"),
+                ("hwdec", "d3d11va"),
+                ("d3d11-adapter", "NVIDIA"),
+            ]
+        );
+        assert_eq!(
+            video_pipeline_options(false),
+            &[("gpu-api", "auto"), ("hwdec", "auto")]
+        );
     }
 }

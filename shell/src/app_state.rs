@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -7,9 +8,11 @@ use crate::{
     auth::{AddonRow, AuthService, NuvioProfile},
     collections::Collection,
     content::ContentService,
+    downloads::DownloadManager,
     home_layout::{CatalogDefinition, HomeLayout, HomeLayoutPlan},
     metadata::MetadataConfig,
     player::PlayerService,
+    settings::SettingsSnapshot,
 };
 
 pub struct AppState {
@@ -21,7 +24,12 @@ pub struct AppState {
     pub active_profile_index: i32,
     pub addons: Vec<AddonRow>,
     pub content: Arc<Mutex<ContentService>>,
+    pub downloads: Arc<Mutex<DownloadManager>>,
     pub metadata_config: MetadataConfig,
+    /// Profile settings live in memory just like Nuvio's StateFlow-backed
+    /// repositories. They are refreshed on profile changes, not page mounts.
+    pub settings_snapshot: Option<SettingsSnapshot>,
+    pub settings_blob: Option<Value>,
     /// Cached so `content.home` can order rows without a Supabase round trip on
     /// every render. Refreshed whenever the profile, addons or layout change.
     pub home_layout: HomeLayoutPlan,
@@ -39,7 +47,10 @@ impl Default for AppState {
             active_profile_index: 1,
             addons: Vec::new(),
             content: Arc::new(Mutex::new(ContentService::default())),
+            downloads: Arc::new(Mutex::new(DownloadManager::default())),
             metadata_config: MetadataConfig::default(),
+            settings_snapshot: None,
+            settings_blob: None,
             home_layout: HomeLayoutPlan::default(),
             session_restore_attempted: false,
         }
@@ -83,7 +94,9 @@ impl AppState {
                 .unwrap_or(1);
         }
         self.refresh_addons()?;
-        self.refresh_metadata();
+        if let Err(error) = self.refresh_settings() {
+            eprintln!("profile settings could not be loaded: {error:#}");
+        }
         Ok(())
     }
 
@@ -129,10 +142,32 @@ impl AppState {
             .unwrap_or_default();
     }
 
+    pub fn refresh_settings(&mut self) -> anyhow::Result<()> {
+        // Never expose the previous profile's values while a new profile is
+        // being selected, especially if the network request fails.
+        self.settings_snapshot = None;
+        self.settings_blob = None;
+        self.metadata_config = MetadataConfig::default();
+        let (snapshot, blob) = crate::settings::load(&self.auth, self.active_profile_index)?;
+        self.metadata_config = crate::settings::metadata_config_from_blob(
+            &self.auth,
+            self.active_profile_index,
+            &blob,
+        );
+        self.settings_snapshot = Some(snapshot);
+        self.settings_blob = Some(blob);
+        Ok(())
+    }
+
     pub fn refresh_metadata(&mut self) {
-        self.metadata_config =
-            crate::settings::load_metadata_config(&self.auth, self.active_profile_index)
-                .unwrap_or_default();
+        if let Some(blob) = self.settings_blob.as_ref() {
+            self.metadata_config = crate::settings::metadata_config_from_cached_credentials(
+                blob,
+                &self.metadata_config,
+            );
+        } else {
+            self.metadata_config = MetadataConfig::default();
+        }
     }
 
     pub fn effective_addon_profile_id(&self) -> i32 {
@@ -213,7 +248,7 @@ impl AppState {
         self.profiles = self.auth.profiles()?;
         self.active_profile_index = next_index;
         self.refresh_addons()?;
-        self.refresh_metadata();
+        self.refresh_settings()?;
         Ok(())
     }
 }

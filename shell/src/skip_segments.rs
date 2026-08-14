@@ -8,7 +8,7 @@ use serde_json::Value;
 const INTRO_DB_URL: &str = "https://api.introdb.app/segments";
 const ANI_SKIP_URL: &str = "https://api.aniskip.com/v2/skip-times";
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkipSegment {
     pub start_ms: i64,

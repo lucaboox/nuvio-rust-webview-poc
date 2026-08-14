@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{auth::AuthService, content::ContentMeta};
+use crate::{
+    auth::AuthService,
+    content::{ContentMeta, ExternalRating},
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +33,7 @@ pub struct LibraryItem {
     pub director: Vec<String>,
     pub writer: Vec<String>,
     pub trailers: Vec<Value>,
+    pub external_ratings: Vec<ExternalRating>,
     pub videos: Vec<Value>,
     pub has_scheduled_videos: bool,
 }
@@ -146,7 +150,27 @@ fn parse_row(row: &Value) -> LibraryItem {
         director: Vec::new(),
         writer: Vec::new(),
         trailers: Vec::new(),
+        external_ratings: Vec::new(),
         videos: Vec::new(),
         has_scheduled_videos: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_items_include_required_metadata_arrays() {
+        let item = parse_row(&json!({
+            "content_id": "tt0000001",
+            "content_type": "movie",
+            "name": "Example"
+        }));
+        let value = serde_json::to_value(item).expect("library item should serialize");
+
+        assert_eq!(value["externalRatings"], json!([]));
+        assert_eq!(value["videos"], json!([]));
+        assert_eq!(value["trailers"], json!([]));
     }
 }

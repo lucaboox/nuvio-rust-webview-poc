@@ -10,6 +10,7 @@ import type {
 import { CollectionSettingsSection } from "./CollectionsPage";
 import { HomeLayoutSection } from "./HomeLayoutPage";
 import { UpdatesSection } from "./UpdatesSection";
+import { DownloadSettingsSection } from "./DownloadSettingsSection";
 import { Icon } from "./Icon";
 import { setClientSetting, useClientSettings } from "../data/clientSettings";
 import type { ClientSettings } from "../data/clientSettings";
@@ -30,6 +31,7 @@ const SCOPE_NOTE: Record<SettingScope, string> = {
 
 export function SettingsPage({
   profileIndex,
+  settings,
   collections,
   availableCatalogs,
   collectionsLoading,
@@ -43,6 +45,7 @@ export function SettingsPage({
   onHomeLayoutChanged,
 }: {
   profileIndex: number;
+  settings: SettingsSnapshot | null;
   collections: NuvioCollection[];
   availableCatalogs: AvailableCollectionCatalog[];
   collectionsLoading: boolean;
@@ -68,7 +71,6 @@ export function SettingsPage({
   onSettingsChange?(settings: SettingsSnapshot): void;
   onHomeLayoutChanged?(): void;
 }) {
-  const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sectionId, setSectionId] = useState<string>(SECTIONS[0].id);
@@ -78,14 +80,7 @@ export function SettingsPage({
   const paneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setSettings(null);
     setError(null);
-    invoke<SettingsSnapshot>("settings.load")
-      .then((value) => {
-        setSettings(value);
-        onSettingsChange?.(value);
-      })
-      .catch((reason: Error) => setError(reason.message));
   }, [profileIndex]);
 
   // Highlighting is a one-shot cue after jumping from a search result, so it
@@ -106,7 +101,6 @@ export function SettingsPage({
     setError(null);
     try {
       const next = await invoke<SettingsSnapshot>("settings.update", { key, value });
-      setSettings(next);
       onSettingsChange?.(next);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Setting update failed");
@@ -121,7 +115,7 @@ export function SettingsPage({
         <div className="feature-title">
           <div>
             <h1>Settings</h1>
-            <p>{error || "Loading settings…"}</p>
+            <p>{error || "Settings are unavailable for this profile."}</p>
           </div>
         </div>
       </div>
@@ -267,6 +261,8 @@ export function SettingsPage({
             />
           ) : section.custom === "updates" ? (
             <UpdatesSection />
+          ) : section.custom === "downloads" ? (
+            <DownloadSettingsSection />
           ) : (
             section.groups.map((group) => (
               <section className="settings-group" key={group.title}>

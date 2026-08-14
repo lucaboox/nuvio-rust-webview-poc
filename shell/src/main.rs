@@ -4,6 +4,7 @@ mod app_state;
 mod auth;
 mod collections;
 mod content;
+mod downloads;
 mod home_layout;
 mod ipc;
 mod library;
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use app_state::AppState;
 use serde_json::Value;
-use tauri::{Manager, State, Window, WindowEvent};
+use tauri::{AppHandle, Manager, State, Window, WindowEvent};
 
 type SharedState = Arc<Mutex<AppState>>;
 
@@ -30,8 +31,8 @@ type SharedState = Arc<Mutex<AppState>>;
 /// The explicit async command mode forces this synchronous handler onto
 /// Tauri's worker pool. The blocking operations below therefore cannot stall
 /// the UI thread.
-#[tauri::command(async)]
-fn bridge(raw: String, window: Window, state: State<'_, SharedState>) -> Vec<Value> {
+#[tauri::command]
+async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value>, String> {
     if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)
         && request.method == "window.setFullscreen"
     {
@@ -43,33 +44,51 @@ fn bridge(raw: String, window: Window, state: State<'_, SharedState>) -> Vec<Val
         let outcome = window
             .set_fullscreen(enabled)
             .map(|()| serde_json::json!({ "fullscreen": enabled }));
-        return vec![to_value(ipc::OutboundMessage::Response(match outcome {
-            Ok(result) => ipc::ResponseEnvelope {
-                id: request.id,
-                ok: true,
-                result: Some(result),
-                error: None,
+        return Ok(vec![to_value(ipc::OutboundMessage::Response(
+            match outcome {
+                Ok(result) => ipc::ResponseEnvelope {
+                    id: request.id,
+                    ok: true,
+                    result: Some(result),
+                    error: None,
+                },
+                Err(error) => ipc::ResponseEnvelope {
+                    id: request.id,
+                    ok: false,
+                    result: None,
+                    error: Some(ipc::ErrorBody {
+                        code: "window_command_failed",
+                        message: error.to_string(),
+                    }),
+                },
             },
-            Err(error) => ipc::ResponseEnvelope {
-                id: request.id,
-                ok: false,
-                result: None,
-                error: Some(ipc::ErrorBody {
-                    code: "window_command_failed",
-                    message: error.to_string(),
-                }),
-            },
-        }))];
+        ))]);
     }
 
-    let shared = state.inner();
+    let shared = Arc::clone(app.state::<SharedState>().inner());
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || dispatch_bridge(&raw, &shared))
+            .await
+            .map_err(|error| format!("native bridge task failed: {error}"))?,
+    )
+}
+
+/// Account restoration, addon calls, settings sync and thumbnail extraction
+/// all use blocking APIs. Running them directly in Tauri's async command
+/// context can panic when a dependency (notably Windows Credential Manager)
+/// tears down its own runtime. Keep the async bridge responsive and isolate
+/// that work on the runtime's blocking pool.
+fn dispatch_bridge(raw: &str, shared: &SharedState) -> Vec<Value> {
     let messages = match ipc::handle_player_shared(&raw, shared) {
         Some(messages) => messages,
-        None => match ipc::handle_content_shared(&raw, shared) {
+        None => match ipc::handle_downloads_shared(&raw, shared) {
             Some(messages) => messages,
-            None => match shared.lock() {
-                Ok(mut state) => ipc::handle(&raw, &mut state),
-                Err(_) => return Vec::new(),
+            None => match ipc::handle_content_shared(&raw, shared) {
+                Some(messages) => messages,
+                None => match shared.lock() {
+                    Ok(mut state) => ipc::handle(&raw, &mut state),
+                    Err(_) => return Vec::new(),
+                },
             },
         },
     };
@@ -87,10 +106,17 @@ fn to_value(message: ipc::OutboundMessage) -> Value {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(SharedState::default())
         .invoke_handler(tauri::generate_handler![bridge])
         .setup(|app| {
+            {
+                let state: State<'_, SharedState> = app.state();
+                if let Ok(state) = state.lock() {
+                    downloads::resume_queue(&state.downloads);
+                }
+            }
             // mpv renders into a child of the top-level window, underneath the
             // transparent webview, so the player needs that window's handle
             // before any playback can start.

@@ -22,9 +22,11 @@ The install/update release process is documented in [RELEASING.md](./RELEASING.m
 - The gray desktop theme includes a synced AMOLED-black option.
 - Library items use Nuvio's existing profile-scoped sync RPCs and can be added or removed from Details.
 - Direct HTTP streams render through libmpv inside the main window; saved progress selects the resume episode, seeks to the saved position, and syncs playback progress.
+- Direct HTTP sources can be queued from the source context menu for offline playback. The persistent Downloads page tracks progress, caches artwork and episode skip markers, and supports whole-season matching by binge group/addon quality.
+- **Settings > Downloads** provides a native folder picker and safely moves completed media and cached artwork to a new location.
 - Signed application updates can be checked and installed from **Settings > Updates**.
 
-This remains an incremental POC: it supports Stremio-compatible addon HTTP resources but does not execute Nuvio QuickJS plugins, and torrent-only sources still need a resolver/debrid layer before libmpv can open them. The Supabase refresh token is stored in Windows Credential Manager; access tokens remain memory-only and sign-out removes the saved credential.
+This remains an incremental POC: it supports Stremio-compatible addon HTTP resources but does not execute Nuvio QuickJS plugins, and torrent-only sources still need a resolver/debrid layer before libmpv can open them. Offline downloads currently require a direct file response; segmented HLS/DASH manifests are rejected rather than saved as incomplete media. The Supabase refresh token is stored in Windows Credential Manager; access tokens remain memory-only and sign-out removes the saved credential.
 
 ## Prerequisites
 

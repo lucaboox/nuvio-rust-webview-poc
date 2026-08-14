@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use reqwest::blocking::Client;
+use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use url::Url;
 
 use crate::content::{ContentMeta, ExternalRating, MetaPerson, MetaTrailer};
@@ -50,6 +52,186 @@ pub struct MdbListMetadataSettings {
     pub enabled: bool,
     pub api_key: String,
     pub providers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonDetail {
+    pub tmdb_id: i64,
+    pub name: String,
+    pub biography: Option<String>,
+    pub birthday: Option<String>,
+    pub deathday: Option<String>,
+    pub place_of_birth: Option<String>,
+    pub profile_photo: Option<String>,
+    pub known_for: Option<String>,
+    pub movie_credits: Vec<PersonCredit>,
+    pub tv_credits: Vec<PersonCredit>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonCredit {
+    pub id: String,
+    pub content_type: String,
+    pub name: String,
+    pub poster: String,
+    pub background: Option<String>,
+    pub description: Option<String>,
+    pub release_info: Option<String>,
+    pub raw_release_date: Option<String>,
+    pub popularity: Option<f64>,
+}
+
+/// Mirrors Nuvio's dedicated TMDB person route. Cast is preferred for actors,
+/// while creators/directors/writers prefer crew credits, with the other bucket
+/// retained as a fallback when TMDB has no entries in the preferred bucket.
+pub fn fetch_person_detail(
+    client: &Client,
+    person_id: i64,
+    prefer_crew_credits: Option<bool>,
+    settings: &TmdbMetadataSettings,
+) -> Result<PersonDetail> {
+    if !settings.enabled || settings.api_key.trim().is_empty() {
+        anyhow::bail!("TMDB metadata must be enabled to browse a person");
+    }
+
+    let (person_result, credits_result) = rayon::join(
+        || tmdb_get(client, &format!("person/{person_id}"), settings, &[]),
+        || {
+            tmdb_get(
+                client,
+                &format!("person/{person_id}/combined_credits"),
+                settings,
+                &[],
+            )
+        },
+    );
+    let person = person_result?;
+    let credits = credits_result.unwrap_or_else(|_| json!({}));
+
+    let mut biography = string(&person, "biography");
+    if biography.is_none() && !settings.language.eq_ignore_ascii_case("en") {
+        let mut english = settings.clone();
+        english.language = "en".to_string();
+        biography = tmdb_get(client, &format!("person/{person_id}"), &english, &[])
+            .ok()
+            .and_then(|value| string(&value, "biography"));
+    }
+
+    let auto_prefers_crew = string(&person, "known_for_department")
+        .map(|department| {
+            let department = department.to_ascii_lowercase();
+            department != "acting" && department != "actors"
+        })
+        .unwrap_or(false);
+    let prefer_crew = prefer_crew_credits.unwrap_or(auto_prefers_crew);
+    let cast = credits
+        .get("cast")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let crew = credits
+        .get("crew")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let cast_movies = map_person_credits(cast, "movie");
+    let crew_movies = map_person_credits(crew, "movie");
+    let cast_tv = map_person_credits(cast, "tv");
+    let crew_tv = map_person_credits(crew, "tv");
+
+    Ok(PersonDetail {
+        tmdb_id: person
+            .get("id")
+            .and_then(Value::as_i64)
+            .unwrap_or(person_id),
+        name: string(&person, "name").unwrap_or_else(|| "Unknown".to_string()),
+        biography,
+        birthday: string(&person, "birthday"),
+        deathday: string(&person, "deathday"),
+        place_of_birth: string(&person, "place_of_birth"),
+        profile_photo: image(&person, "profile_path", "w500"),
+        known_for: string(&person, "known_for_department"),
+        movie_credits: select_person_credits(prefer_crew, cast_movies, crew_movies),
+        tv_credits: select_person_credits(prefer_crew, cast_tv, crew_tv),
+    })
+}
+
+fn select_person_credits(
+    prefer_crew: bool,
+    cast: Vec<PersonCredit>,
+    crew: Vec<PersonCredit>,
+) -> Vec<PersonCredit> {
+    if prefer_crew && !crew.is_empty() {
+        crew
+    } else if !cast.is_empty() {
+        cast
+    } else {
+        crew
+    }
+}
+
+fn map_person_credits(items: &[Value], media_type: &str) -> Vec<PersonCredit> {
+    let mut ordered = items
+        .iter()
+        .filter(|item| string(item, "media_type").as_deref() == Some(media_type))
+        .filter(|item| item.get("poster_path").is_some() || item.get("backdrop_path").is_some())
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        let left = left
+            .get("vote_average")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let right = right
+            .get("vote_average")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        right.total_cmp(&left)
+    });
+
+    let mut seen = HashSet::new();
+    ordered
+        .into_iter()
+        .filter_map(|credit| {
+            let tmdb_id = credit.get("id").and_then(Value::as_i64)?;
+            if !seen.insert(tmdb_id) {
+                return None;
+            }
+            let content_type = if media_type == "tv" {
+                "series"
+            } else {
+                "movie"
+            };
+            let name = if media_type == "tv" {
+                string(credit, "name").or_else(|| string(credit, "title"))?
+            } else {
+                string(credit, "title").or_else(|| string(credit, "name"))?
+            };
+            let poster = image(credit, "poster_path", "w500")
+                .or_else(|| image(credit, "backdrop_path", "w780"))?;
+            let raw_release_date = if media_type == "tv" {
+                string(credit, "first_air_date")
+            } else {
+                string(credit, "release_date")
+            };
+            Some(PersonCredit {
+                id: format!("tmdb:{tmdb_id}"),
+                content_type: content_type.to_string(),
+                name,
+                poster,
+                background: image(credit, "backdrop_path", "w780"),
+                description: string(credit, "overview"),
+                release_info: raw_release_date
+                    .as_deref()
+                    .and_then(|date| date.get(..4))
+                    .map(str::to_string),
+                raw_release_date,
+                popularity: credit.get("popularity").and_then(Value::as_f64),
+            })
+        })
+        .collect()
 }
 
 pub fn enrich_tmdb(client: &Client, mut meta: ContentMeta, config: &MetadataConfig) -> ContentMeta {
@@ -646,7 +828,7 @@ fn select_localized_logo<'a>(items: &'a [Value], language: &str) -> Option<&'a V
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::select_localized_logo;
+    use super::{map_person_credits, select_localized_logo, select_person_credits};
     use serde_json::json;
 
     #[test]
@@ -675,6 +857,38 @@ mod tests {
             .and_then(|path| path.as_str());
 
         assert_eq!(selected, Some("/us.png"));
+    }
+
+    #[test]
+    fn person_credits_are_sorted_and_deduplicated_like_nuvio() {
+        let credits = vec![
+            json!({ "id": 10, "media_type": "movie", "title": "Lower", "poster_path": "/lower.jpg", "release_date": "2020-01-01", "vote_average": 5.0, "popularity": 8.0 }),
+            json!({ "id": 20, "media_type": "movie", "title": "Higher", "poster_path": "/higher.jpg", "release_date": "2024-01-01", "vote_average": 9.0, "popularity": 7.0 }),
+            json!({ "id": 20, "media_type": "movie", "title": "Duplicate job", "poster_path": "/duplicate.jpg", "vote_average": 8.0 }),
+            json!({ "id": 30, "media_type": "tv", "name": "Wrong medium", "poster_path": "/tv.jpg", "vote_average": 10.0 }),
+        ];
+
+        let mapped = map_person_credits(&credits, "movie");
+
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(mapped[0].id, "tmdb:20");
+        assert_eq!(mapped[0].name, "Higher");
+        assert_eq!(mapped[1].id, "tmdb:10");
+    }
+
+    #[test]
+    fn creator_credits_fall_back_to_cast_when_crew_is_empty() {
+        let cast = map_person_credits(
+            &[
+                json!({ "id": 20, "media_type": "tv", "name": "Cast show", "poster_path": "/cast.jpg" }),
+            ],
+            "tv",
+        );
+
+        let selected = select_person_credits(true, cast, Vec::new());
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "Cast show");
     }
 }
 fn image(value: &Value, key: &str, size: &str) -> Option<String> {

@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use crate::auth::AuthService;
 use crate::metadata::{MdbListMetadataSettings, MetadataConfig, TmdbMetadataSettings};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub amoled_enabled: bool,
@@ -48,6 +48,8 @@ pub struct SettingsSnapshot {
     pub use_libass: bool,
     // Autoplay / next episode
     pub autoplay_source: String,
+    pub autoplay_selected_addons: Vec<String>,
+    pub autoplay_selected_plugins: Vec<String>,
     pub autoplay_regex: String,
     pub autoplay_timeout_seconds: i64,
     pub autoplay_prefer_binge_group: bool,
@@ -216,8 +218,15 @@ pub fn load(auth: &AuthService, profile_id: i32) -> Result<(SettingsSnapshot, Va
     Ok((snapshot(&blob), blob))
 }
 
-pub fn load_metadata_config(auth: &AuthService, profile_id: i32) -> Result<MetadataConfig> {
-    let (_, blob) = load(auth, profile_id)?;
+/// Builds the metadata switches from the settings blob already held by the
+/// application. Nuvio keeps this state alive for the selected profile; pulling
+/// the same blob again just to configure metadata makes every settings visit
+/// and update pay for an unnecessary network request.
+pub fn metadata_config_from_blob(
+    auth: &AuthService,
+    profile_id: i32,
+    blob: &Value,
+) -> MetadataConfig {
     let credentials = auth
         .rpc_value(
             "sync_pull_provider_credentials",
@@ -242,7 +251,28 @@ pub fn load_metadata_config(auth: &AuthService, profile_id: i32) -> Result<Metad
     };
     let tmdb_api_key = credential("tmdb");
     let mdblist_api_key = credential("mdblist");
-    Ok(MetadataConfig {
+    metadata_config_with_keys(blob, tmdb_api_key, mdblist_api_key)
+}
+
+/// Re-evaluates metadata switches after a settings write without refetching
+/// provider credentials that are already held in memory.
+pub fn metadata_config_from_cached_credentials(
+    blob: &Value,
+    current: &MetadataConfig,
+) -> MetadataConfig {
+    metadata_config_with_keys(
+        blob,
+        current.tmdb.api_key.clone(),
+        current.mdblist.api_key.clone(),
+    )
+}
+
+fn metadata_config_with_keys(
+    blob: &Value,
+    tmdb_api_key: String,
+    mdblist_api_key: String,
+) -> MetadataConfig {
+    MetadataConfig {
         tmdb: TmdbMetadataSettings {
             enabled: typed_bool(&blob, "tmdb_settings", "tmdb_enabled").unwrap_or(false)
                 && !tmdb_api_key.is_empty(),
@@ -280,16 +310,20 @@ pub fn load_metadata_config(auth: &AuthService, profile_id: i32) -> Result<Metad
             .map(|(provider, _)| provider.to_string())
             .collect(),
         },
-    })
+    }
 }
 
-pub fn update(
+/// Updates a caller-owned profile blob and returns the new cache contents.
+/// The remote write happens before the new value is exposed, so a failed sync
+/// cannot make the UI claim a setting was saved when it was not.
+pub fn update_cached(
     auth: &AuthService,
     profile_id: i32,
+    current_blob: &Value,
     key: &str,
     value: Value,
-) -> Result<SettingsSnapshot> {
-    let (_, mut blob) = load(auth, profile_id)?;
+) -> Result<(SettingsSnapshot, Value)> {
+    let mut blob = current_blob.clone();
     if key.starts_with("poster") {
         set_poster_style(&mut blob, key, value)?;
     } else if key == "episodeReleaseAlerts" {
@@ -317,10 +351,10 @@ pub fn update(
             "p_origin_client_id": auth.sync_client_id(),
         }),
     )?;
-    Ok(snapshot(&blob))
+    Ok((snapshot(&blob), blob))
 }
 
-fn snapshot(blob: &Value) -> SettingsSnapshot {
+pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
     SettingsSnapshot {
         amoled_enabled: typed_bool(blob, "theme_settings", "amoled_enabled").unwrap_or(false),
         show_loading_overlay: typed_bool(blob, "player_settings", "show_loading_overlay")
@@ -431,6 +465,8 @@ fn snapshot(blob: &Value) -> SettingsSnapshot {
         ),
         use_libass: player_bool(blob, "use_libass", false),
         autoplay_source: player_string(blob, "stream_auto_play_source", "ALL_SOURCES"),
+        autoplay_selected_addons: player_string_set(blob, "stream_auto_play_selected_addons"),
+        autoplay_selected_plugins: player_string_set(blob, "stream_auto_play_selected_plugins"),
         autoplay_regex: player_string(blob, "stream_auto_play_regex", ""),
         autoplay_timeout_seconds: player_int(blob, "stream_auto_play_timeout_seconds", 3),
         autoplay_prefer_binge_group: player_bool(blob, "stream_auto_play_prefer_binge_group", true),
@@ -652,7 +688,16 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         "autoplaySource"
             if !matches!(
                 value.as_str(),
-                Some("ALL_SOURCES" | "ADDONS_ONLY" | "PLUGINS_ONLY" | "SELECTED")
+                Some(
+                    "ALL_SOURCES"
+                        | "INSTALLED_ADDONS_ONLY"
+                        | "ENABLED_PLUGINS_ONLY"
+                        // Read older prototype values long enough for existing
+                        // profiles to migrate through the settings UI.
+                        | "ADDONS_ONLY"
+                        | "PLUGINS_ONLY"
+                        | "SELECTED"
+                )
             ) =>
         {
             bail!("unsupported autoplay source")
@@ -751,6 +796,18 @@ fn typed_i64(blob: &Value, feature: &str, key: &str) -> Option<i64> {
 fn player_string(blob: &Value, key: &str, fallback: &str) -> String {
     typed_string(blob, "player_settings", key).unwrap_or_else(|| fallback.to_string())
 }
+fn player_string_set(blob: &Value, key: &str) -> Vec<String> {
+    typed_value(blob, "player_settings", key, "string_set")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 fn player_bool(blob: &Value, key: &str, fallback: bool) -> bool {
     typed_bool(blob, "player_settings", key).unwrap_or(fallback)
 }
@@ -776,18 +833,29 @@ mod tests {
             ("autoplayTimeoutSeconds", json!(5)),
             ("holdToSpeedValue", json!(2.5)),
             ("subtitleTextColor", json!("#FFEEDDCC")),
-            ("autoplaySource", json!("ADDONS_ONLY")),
+            ("autoplaySource", json!("INSTALLED_ADDONS_ONLY")),
         ] {
             let (feature, storage_key, kind) = setting_path(key).expect(key);
             let normalized = validate_value(key, value, kind).expect(key);
             set_typed_preference(&mut blob, feature, storage_key, kind, normalized).unwrap();
         }
+        blob.pointer_mut("/features/player_settings")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "stream_auto_play_selected_addons".to_string(),
+                json!({ "type": "string_set", "value": ["Torrentio", "AIOStreams"] }),
+            );
         let snapshot = snapshot(&blob);
         assert_eq!(snapshot.subtitle_outline_width, 3);
         assert_eq!(snapshot.autoplay_timeout_seconds, 5);
         assert_eq!(snapshot.hold_to_speed_value, 2.5);
         assert_eq!(snapshot.subtitle_text_color, "#FFEEDDCC");
-        assert_eq!(snapshot.autoplay_source, "ADDONS_ONLY");
+        assert_eq!(snapshot.autoplay_source, "INSTALLED_ADDONS_ONLY");
+        assert_eq!(
+            snapshot.autoplay_selected_addons,
+            vec!["Torrentio".to_string(), "AIOStreams".to_string()]
+        );
         // Defaults must match Nuvio's, not zero.
         assert!(snapshot.hold_to_speed);
         assert_eq!(snapshot.subtitle_bottom_offset, 20);

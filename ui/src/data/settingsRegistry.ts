@@ -43,7 +43,7 @@ export type SettingSection = {
   subtitle: string;
   groups: SettingGroup[];
   /** Sections whose body is a bespoke component rather than a control list. */
-  custom?: "homeLayout" | "collections" | "updates";
+  custom?: "homeLayout" | "collections" | "downloads" | "updates";
 };
 
 const LANGUAGES = [
@@ -227,8 +227,8 @@ export const SECTIONS: SettingSection[] = [
               kind: "preset",
               options: [
                 ["All sources", "ALL_SOURCES"],
-                ["Addons only", "ADDONS_ONLY"],
-                ["Plugins only", "PLUGINS_ONLY"],
+                ["Installed addons only", "INSTALLED_ADDONS_ONLY"],
+                ["Plugins only", "ENABLED_PLUGINS_ONLY"],
               ],
             },
           },
@@ -308,8 +308,8 @@ export const SECTIONS: SettingSection[] = [
           },
           {
             id: "autoplayReuseBingeGroup",
-            label: "Reuse release group link",
-            detail: "Skip re-scraping when the group already matched",
+            label: "Remember release group",
+            detail: "Use the last binge group when you return to a series",
             control: { kind: "switch" },
           },
           {
@@ -597,6 +597,15 @@ export const SECTIONS: SettingSection[] = [
         ],
       },
     ],
+  },
+  {
+    id: "downloads",
+    label: "Downloads",
+    icon: "downloads",
+    scope: "local",
+    subtitle: "Offline storage location and downloaded media files.",
+    custom: "downloads",
+    groups: [],
   },
   {
     id: "updates",

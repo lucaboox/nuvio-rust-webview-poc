@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
-import type { SettingsSnapshot, StreamSource, Video } from "../bridge/types";
+import type { ProgressSnapshot, SettingsSnapshot, StreamSource, Video } from "../bridge/types";
 import type { PlayContext } from "./DetailsOverlay";
 import { Icon } from "./Icon";
 import { resolveNextEpisode, shouldShowNextEpisode } from "../data/nextEpisode";
-import { contentKey, removeStreamLink } from "../data/streamLinkCache";
+import { contentKey, removeStreamLink, saveStreamLink } from "../data/streamLinkCache";
 import { useClientSettings } from "../data/clientSettings";
+import {
+  autoplayCandidates,
+  selectAutoplayFallback,
+  selectPreferredBingeGroup,
+  waitForAutoplayWindow,
+} from "../data/streamAutoplay";
+import { saveBingeGroup } from "../data/bingeGroupCache";
+import { EpisodeBadge } from "./WatchStatus";
 
 type PlayerTrack = { id: number; kind: "audio" | "sub"; title: string; lang: string; selected: boolean };
 
@@ -20,23 +28,32 @@ type NativePlayerState = {
   audioTrack: number;
   subtitleTrack: number;
   tracks: PlayerTrack[];
+  ended: boolean;
   error?: string;
+  warning?: string;
 };
 
 type PendingValue<T> = { value: T; submittedAt: number };
 type SkipSegment = { startMs: number; endMs: number; type: string; provider: string };
 
-export type ActivePlayback = { title: string; context: PlayContext };
+export type ActivePlayback = {
+  title: string;
+  context: PlayContext;
+  stream: StreamSource;
+};
 
-const emptyState: NativePlayerState = { active: true, loading: true, paused: false, positionMs: 0, durationMs: 0, volume: 100, muted: false, audioTrack: -1, subtitleTrack: -1, tracks: [] };
+const emptyState: NativePlayerState = { active: true, loading: true, paused: false, positionMs: 0, durationMs: 0, volume: 100, muted: false, audioTrack: -1, subtitleTrack: -1, tracks: [], ended: false };
 
-export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }: { playback: ActivePlayback; amoled: boolean; settings?: SettingsSnapshot | null; onBack(): void; onPlayEpisode?(video: Video): void }) {
+export function PlayerPage({ playback, progress, amoled, settings, onBack, onPlayEpisode }: { playback: ActivePlayback; progress: ProgressSnapshot; amoled: boolean; settings?: SettingsSnapshot | null; onBack(): void; onPlayEpisode?(video: Video, stream: StreamSource): Promise<void> | void }) {
   const [state, setState] = useState(emptyState);
   const [fullscreen, setFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [trackPicker, setTrackPicker] = useState<"audio" | "sub" | null>(null);
   const [panel, setPanel] = useState<"episodes" | "sources" | null>(null);
   const [sources, setSources] = useState<StreamSource[] | null>(null);
+  const [sourceEpisode, setSourceEpisode] = useState<Video | null>(null);
+  const [currentStream, setCurrentStream] = useState(playback.stream);
+  const [advancing, setAdvancing] = useState(false);
   const [nextDismissed, setNextDismissed] = useState(false);
   const [seekBusy, setSeekBusy] = useState(false);
   const [speeding, setSpeeding] = useState(false);
@@ -46,8 +63,12 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
   const pulseTimer = useRef<number | null>(null);
   const [preview, setPreview] = useState<{ positionMs: number; x: number; image?: string; exact: boolean } | null>(null);
   const previewTimer = useRef<number | null>(null);
+  const previewRef = useRef<typeof preview>(null);
+  const previewInFlight = useRef(false);
+  const pendingPreviewBucket = useRef<number | null>(null);
+  const previewGeneration = useRef(0);
   // Frames are cached per 10s bucket so scrubbing back over the same stretch
-  // costs nothing; a decode is ~100-400ms over the network.
+  // costs nothing; an uncached remote seek still depends on its server/index.
   const previewCache = useRef(new Map<number, string>());
   const [, setClockTick] = useState(0);
   const [skipSegments, setSkipSegments] = useState<SkipSegment[]>([]);
@@ -63,6 +84,14 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
   const pendingVolume = useRef<PendingValue<number> | null>(null);
   const pendingPause = useRef<PendingValue<boolean> | null>(null);
   const pendingMute = useRef<PendingValue<boolean> | null>(null);
+  const advanceInFlight = useRef(false);
+  const autoAdvancedVideo = useRef<string | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const command = useCallback((method: string, params: Record<string, unknown> = {}) => {
     invoke(method, params).catch(() => undefined);
@@ -177,6 +206,16 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     setNextDismissed(false);
     setPanel(null);
     setSources(null);
+    setSourceEpisode(null);
+    setCurrentStream(playback.stream);
+    setAdvancing(false);
+    advanceInFlight.current = false;
+    autoAdvancedVideo.current = null;
+    previewGeneration.current += 1;
+    pendingPreviewBucket.current = null;
+    previewCache.current.clear();
+    previewRef.current = null;
+    setPreview(null);
   }, [playback.context.videoId]);
 
   useEffect(() => {
@@ -185,19 +224,17 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     setDismissedSegment(null);
     const context = playback.context;
     if (context.season == null || context.episode == null) return () => { live = false; };
-    invoke<SettingsSnapshot>("settings.load")
-      .then((settings) => settings.skipIntro
-        ? invoke<{ segments: SkipSegment[] }>("player.skipSegments", {
-            contentId: context.contentId,
-            videoId: context.videoId,
-            season: context.season,
-            episode: context.episode,
-          })
-        : { segments: [] })
+    if (settings?.skipIntro === false) return () => { live = false; };
+    invoke<{ segments: SkipSegment[] }>("player.skipSegments", {
+      contentId: context.contentId,
+      videoId: context.videoId,
+      season: context.season,
+      episode: context.episode,
+    })
       .then((result) => { if (live) setSkipSegments(result.segments); })
       .catch(() => { if (live) setSkipSegments([]); });
     return () => { live = false; };
-  }, [playback.context.contentId, playback.context.videoId, playback.context.season, playback.context.episode]);
+  }, [playback.context.contentId, playback.context.videoId, playback.context.season, playback.context.episode, settings?.skipIntro]);
 
   const seek = useCallback((positionMs: number) => {
     const next = Math.max(0, positionMs);
@@ -314,13 +351,15 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
       },
     );
 
-  async function openSourcePanel() {
+  async function openSourcePanel(video?: Video) {
+    const targetId = video?.id ?? playback.context.videoId;
+    setSourceEpisode(video ?? null);
     setPanel("sources");
-    if (sources) return;
+    setSources(null);
     try {
       const result = await invoke<{ streams: StreamSource[] }>("content.streams", {
         type: playback.context.contentType,
-        id: playback.context.videoId,
+        id: targetId,
       });
       setSources(result.streams);
     } catch {
@@ -328,8 +367,28 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     }
   }
 
-  function playSource(stream: StreamSource) {
+  async function playSource(stream: StreamSource) {
     setPanel(null);
+    const target = sourceEpisode;
+    setSourceEpisode(null);
+    if (target && onPlayEpisode) {
+      setCurrentStream(stream);
+      await onPlayEpisode(target, stream);
+      return;
+    }
+    setCurrentStream(stream);
+    saveStreamLink(
+      contentKey(
+        playback.context.contentType,
+        playback.context.videoId,
+        playback.context.contentId,
+        playback.context.season,
+        playback.context.episode,
+      ),
+      stream,
+    );
+
+    saveBingeGroup(playback.context.contentId, stream.behaviorHints?.bingeGroup);
     invoke("player.prepare", {
       mediaId: playback.title,
       url: stream.url,
@@ -345,6 +404,72 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
       },
     }).catch(() => undefined);
   }
+
+  async function advanceToEpisode(video: Video) {
+    if (!onPlayEpisode || advanceInFlight.current) return;
+    advanceInFlight.current = true;
+    setAdvancing(true);
+    setNextDismissed(true);
+    const startedAt = performance.now();
+    try {
+      const result = await invoke<{ streams: StreamSource[] }>("content.streams", {
+        type: playback.context.contentType,
+        id: video.id,
+      });
+      if (!mounted.current) return;
+      const candidates = autoplayCandidates(result.streams, settings, true);
+      // Nuvio's in-player transition uses the stream that is playing now. The
+      // persisted cache is for a later visit to Details, not a substitute for
+      // a current stream that supplied no group.
+      const rememberedGroup = currentStream.behaviorHints?.bingeGroup;
+      const preferred =
+        (settings?.autoplayPreferBingeGroup ?? true)
+          ? selectPreferredBingeGroup(candidates, rememberedGroup)
+          : null;
+      if (preferred) {
+        setCurrentStream(preferred);
+        await onPlayEpisode(video, preferred);
+        return;
+      }
+
+      // Nuvio lets a preferred group select immediately; the configured wait
+      // applies only before First Stream / Regex fallback is evaluated.
+      await waitForAutoplayWindow(startedAt, settings?.autoplayTimeoutSeconds);
+      if (!mounted.current) return;
+      const fallback = selectAutoplayFallback(candidates, settings, true);
+      if (fallback) {
+        setCurrentStream(fallback);
+        await onPlayEpisode(video, fallback);
+        return;
+      }
+
+      // Manual mode, an invalid/no-match regex, or a strict binge-group miss.
+      // Keep the player mounted and show the already-fetched next sources.
+      setSourceEpisode(video);
+      setSources(result.streams);
+      setPanel("sources");
+    } catch {
+      setSourceEpisode(video);
+      setSources([]);
+      setPanel("sources");
+    } finally {
+      advanceInFlight.current = false;
+      if (mounted.current) setAdvancing(false);
+    }
+  }
+
+  useEffect(() => {
+    if (
+      !state.ended ||
+      !settings?.autoplayNextEpisode ||
+      !nextEpisode ||
+      autoAdvancedVideo.current === playback.context.videoId
+    ) {
+      return;
+    }
+    autoAdvancedVideo.current = playback.context.videoId;
+    void advanceToEpisode(nextEpisode);
+  }, [state.ended, settings?.autoplayNextEpisode, nextEpisode?.id, playback.context.videoId]);
 
   const audioTracks = state.tracks.filter((track) => track.kind === "audio");
   const subtitleTracks = state.tracks.filter((track) => track.kind === "sub");
@@ -367,31 +492,59 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     return best;
   }
 
+  function showPreview(next: typeof preview) {
+    previewRef.current = next;
+    setPreview(next);
+  }
+
+  /** Only one decoder request may be active. While the pointer moves, retain
+   * just the newest bucket rather than building a slow queue of obsolete HTTP
+   * opens behind libmpv. */
+  function fetchPreview(bucket: number, generation: number) {
+    if (previewInFlight.current) {
+      pendingPreviewBucket.current = bucket;
+      return;
+    }
+    previewInFlight.current = true;
+    invoke<{ image: string }>("player.thumbnail", { positionMs: bucket })
+      .then((result) => {
+        if (generation !== previewGeneration.current) return;
+        previewCache.current.set(bucket, result.image);
+        const current = previewRef.current;
+        if (
+          current &&
+          Math.round(current.positionMs / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS === bucket
+        ) {
+          showPreview({ ...current, image: result.image, exact: true });
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        previewInFlight.current = false;
+        const next = pendingPreviewBucket.current;
+        pendingPreviewBucket.current = null;
+        if (next != null && previewRef.current && !previewCache.current.has(next)) {
+          fetchPreview(next, previewGeneration.current);
+        }
+      });
+  }
+
   function requestPreview(positionMs: number, x: number) {
     if (!client.seekThumbnails || state.durationMs <= 0) return;
     const bucket = Math.round(positionMs / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
     const exact = previewCache.current.get(bucket);
-    setPreview({ positionMs, x, image: exact ?? nearestCached(bucket), exact: !!exact });
+    showPreview({ positionMs, x, image: exact ?? nearestCached(bucket), exact: !!exact });
     if (exact) return;
     if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
     previewTimer.current = window.setTimeout(() => {
-      invoke<{ image: string }>("player.thumbnail", { positionMs: bucket })
-        .then((result) => {
-          previewCache.current.set(bucket, result.image);
-          // Only apply if the pointer is still near where it was asked for.
-          setPreview((current) =>
-            current && Math.abs(current.positionMs - positionMs) < PREVIEW_BUCKET_MS
-              ? { ...current, image: result.image, exact: true }
-              : current,
-          );
-        })
-        .catch(() => undefined);
-    }, 180);
+      fetchPreview(bucket, previewGeneration.current);
+    }, 120);
   }
 
   function clearPreview() {
     if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
-    setPreview(null);
+    pendingPreviewBucket.current = null;
+    showPreview(null);
   }
 
   function flashPulse(kind: "play" | "pause") {
@@ -453,7 +606,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
           {state.error ? (
             <>
               <span>{state.error}</span>
-              <button className="player-error-action" onClick={openSourcePanel}>
+              <button className="player-error-action" onClick={() => { void openSourcePanel(); }}>
                 Choose another source
               </button>
             </>
@@ -466,6 +619,11 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
         </div>
       </div>
     )}
+    {advancing && (
+      <div className="player-next-searching" role="status">
+        <i className="loading-spinner" /> Finding the next episode source…
+      </div>
+    )}
     {pulse && (
       <div className="player-pulse-glyph" key={pulse} aria-hidden="true">
         <Icon name={pulse === "play" ? "play" : "pause"} size={54} />
@@ -476,6 +634,9 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     )}
     {seekBusy && !state.loading && !state.error && (
       <div className="player-seek-busy" role="status"><i className="loading-spinner" /></div>
+    )}
+    {state.warning && !state.error && (
+      <div className="player-message" role="status">{state.warning}</div>
     )}
     <header
       className="player-overlay-header"
@@ -551,15 +712,17 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
     </section>
     {panel && (
       <PlayerSidePanel
-        title={panel === "episodes" ? (playback.context.showName ?? "Episodes") : "Sources"}
+        title={panel === "episodes" ? (playback.context.showName ?? "Episodes") : (sourceEpisode?.title || "Sources")}
         onClose={() => setPanel(null)}
       >
         {panel === "episodes" ? (
           <EpisodeList
             episodes={episodes}
+            contentId={playback.context.contentId}
             currentId={playback.context.videoId}
             currentSeason={playback.context.season}
-            onPick={(video) => { setPanel(null); onPlayEpisode?.(video); }}
+            progress={progress}
+            onPick={(video) => { setPanel(null); void advanceToEpisode(video); }}
           />
         ) : (
           <SourceList sources={sources} onPick={playSource} />
@@ -583,7 +746,7 @@ export function PlayerPage({ playback, amoled, settings, onBack, onPlayEpisode }
             <strong>{nextEpisode.title || "Episode " + (nextEpisode.episode ?? 1)}</strong>
           </div>
         </div>
-        <button className="player-next-play" onClick={() => { setNextDismissed(true); onPlayEpisode?.(nextEpisode); }}>
+        <button className="player-next-play" onClick={() => { void advanceToEpisode(nextEpisode); }}>
           <Icon name="play" size={17} />Play next episode
         </button>
       </aside>
@@ -606,7 +769,7 @@ function PlayerSidePanel({ title, onClose, children }: { title: string; onClose(
   );
 }
 
-function EpisodeList({ episodes, currentId, currentSeason, onPick }: { episodes: Video[]; currentId: string; currentSeason?: number; onPick(video: Video): void }) {
+function EpisodeList({ episodes, contentId, currentId, currentSeason, progress, onPick }: { episodes: Video[]; contentId: string; currentId: string; currentSeason?: number; progress: ProgressSnapshot; onPick(video: Video): void }) {
   const seasons = [...new Set(episodes.map((video) => video.season ?? 0))]
     .filter((season) => season > 0)
     .sort((left, right) => left - right);
@@ -631,11 +794,14 @@ function EpisodeList({ episodes, currentId, currentSeason, onPick }: { episodes:
           disabled={video.available === false}
           onClick={() => onPick(video)}
         >
-          {video.thumbnail ? (
-            <img src={video.thumbnail} alt="" />
-          ) : (
-            <span className="player-episode-placeholder"><Icon name="play" size={16} /></span>
-          )}
+          <div className="player-episode-thumb">
+            {video.thumbnail ? (
+              <img src={video.thumbnail} alt="" />
+            ) : (
+              <span className="player-episode-placeholder"><Icon name="play" size={16} /></span>
+            )}
+            <EpisodeBadge contentId={contentId} videoId={video.id} season={video.season} episode={video.episode} snapshot={progress} />
+          </div>
           <span>
             <small>S{video.season ?? 0} E{video.episode ?? 1}{video.id === currentId ? " \u00b7 Playing" : ""}</small>
             <strong>{video.title || "Episode " + (video.episode ?? 1)}</strong>
