@@ -560,6 +560,34 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             )
         }
         "auth.state" => success(id, account_payload(state, None)),
+        "auth.configureBackend" => {
+            let self_hosted = request.params.get("selfHosted").and_then(Value::as_bool);
+            match self_hosted {
+                Some(self_hosted) => match state.auth.configure_backend(
+                    self_hosted,
+                    string_param(&request.params, "backendUrl"),
+                    string_param(&request.params, "publishableKey"),
+                ) {
+                    Ok(snapshot) => {
+                        state.profiles.clear();
+                        state.addons.clear();
+                        state.settings_snapshot = None;
+                        state.settings_blob = None;
+                        state.metadata_config = Default::default();
+                        state.content.lock().unwrap().invalidate();
+                        state.active_profile_index = 1;
+                        state.session_restore_attempted = true;
+                        success(id, json!({ "auth": snapshot }))
+                    }
+                    Err(error) => failure(id, "backend_configuration_failed", error.to_string()),
+                },
+                None => failure(
+                    id,
+                    "invalid_params",
+                    "Choose whether to use a self-hosted backend".to_string(),
+                ),
+            }
+        }
         "auth.continueAnonymous" => {
             state.auth.continue_anonymously();
             let warning = state

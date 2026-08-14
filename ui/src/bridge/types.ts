@@ -39,6 +39,10 @@ export type BootstrapResult = {
 export type AuthSnapshot = {
   status: "authenticated" | "unauthenticated";
   backendConfigured: boolean;
+  officialBackendConfigured: boolean;
+  selfHosted: boolean;
+  backendUrl?: string;
+  customKeySaved: boolean;
   userId?: string;
   email?: string;
   isAnonymous: boolean;

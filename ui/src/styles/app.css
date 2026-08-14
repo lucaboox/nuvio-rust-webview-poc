@@ -81,12 +81,16 @@ button { font: inherit; }
 .boot-screen img { width: 142px; }
 .auth-screen { position: relative; display: grid; place-items: center; min-height: 100%; overflow: auto; padding: 38px; background: #090b0e; }
 .auth-atmosphere { position: fixed; inset: 0; background: radial-gradient(circle at 74% 25%, #3a404875 0%, transparent 26%), radial-gradient(circle at 24% 80%, #26344d55 0%, transparent 27%), repeating-linear-gradient(125deg, transparent 0 50px, #ffffff05 51px 52px); }
-.auth-panel { position: relative; z-index: 1; width: min(420px, 100%); padding: 39px 42px 34px; border: 1px solid #30363f; border-radius: 19px; background: linear-gradient(150deg, #272b31f5, #272b31f8); box-shadow: 0 35px 100px #000b; }
+.auth-panel { position: relative; z-index: 1; width: min(460px, 100%); padding: 39px 42px 34px; border: 1px solid #30363f; border-radius: 19px; background: linear-gradient(150deg, #272b31f5, #272b31f8); box-shadow: 0 35px 100px #000b; }
 .auth-panel > img { width: 116px; margin-bottom: 29px; }
 .auth-kicker { display: block; margin-bottom: 8px; color: #aeb4bd; font-size: 8px; font-weight: 800; letter-spacing: .18em; }
 .auth-panel h1 { margin: 0 0 9px; font-size: 28px; letter-spacing: -.04em; }.auth-panel > p { margin: 0 0 25px; color: #858d98; font-size: 11px; line-height: 1.6; }
 .auth-panel form { display: grid; gap: 15px; }.auth-panel label { display: grid; gap: 7px; color: #aeb4bc; font-size: 9px; font-weight: 700; letter-spacing: .04em; }
 .auth-panel input { width: 100%; padding: 12px 13px; border: 1px solid #343a44; border-radius: 9px; outline: 0; color: #edf0f2; background: #0c1016; font: inherit; font-size: 11px; transition: border .15s, box-shadow .15s; }.auth-panel input:focus { border-color: #8b939e; box-shadow: 0 0 0 3px #8e96a118; }
+.self-host-toggle { grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 11px !important; padding: 11px 12px; border: 1px solid #373d46; border-radius: 10px; background: #1d2127; cursor: pointer; }
+.auth-panel .self-host-toggle input { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: #d7dbe0; cursor: pointer; }
+.self-host-toggle span { display: grid; gap: 3px; }.self-host-toggle strong { color: #d9dde1; font-size: 10px; }.self-host-toggle small { color: #747d88; font-size: 8px; font-weight: 400; letter-spacing: 0; }
+.self-host-fields { display: grid; gap: 13px; margin: -3px 0 1px; padding: 14px; border: 1px solid #343a43; border-radius: 10px; background: #20242a; }.self-host-fields > small { color: #68717c; font-size: 8px; line-height: 1.5; }
 .auth-submit { margin-top: 3px; padding: 12px; border: 0; border-radius: 9px; color: #272b31; background: #d5d9de; font-size: 11px; font-weight: 800; cursor: pointer; }.auth-submit:hover { background: #e7e9ec; }.auth-submit:disabled, .guest-button:disabled { opacity: .5; cursor: wait; }
 .auth-switch, .guest-button { width: 100%; border: 0; cursor: pointer; }.auth-switch { margin-top: 17px; color: #a4abb4; background: none; font-size: 9px; }.guest-button { padding: 11px; border: 1px solid #363d47; border-radius: 9px; color: #c9ced4; background: #272b31; font-size: 10px; }
 .auth-divider { position: relative; margin: 20px 0; border-top: 1px solid #32363c; text-align: center; }.auth-divider span { position: relative; top: -8px; padding: 0 9px; color: #5c646f; background: #272b31; font-size: 8px; }

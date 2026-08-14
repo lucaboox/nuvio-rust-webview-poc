@@ -64,6 +64,9 @@ const navItems = [
 const emptyAuth: AuthSnapshot = {
   status: "unauthenticated",
   backendConfigured: false,
+  officialBackendConfigured: false,
+  selfHosted: false,
+  customKeySaved: false,
   isAnonymous: false,
 };
 const emptyProgress: ProgressSnapshot = { entries: [], watchedItems: [] };
@@ -506,7 +509,7 @@ export function App() {
   if (auth.status !== "authenticated")
     return (
       <AuthGate
-        backendConfigured={auth.backendConfigured}
+        auth={auth}
         onAuthenticated={applyAccount}
       />
     );
