@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nuvio",
-  "version": "0.1.0",
-  "identifier": "com.nuvio.desktop.poc",
+  "version": "0.1.0-alpha.1",
+  "identifier": "com.nuvio.desktop",
   "build": {
     "frontendDist": "../ui/dist",
     "beforeBuildCommand": {
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Nuvio · Rust architecture POC",
+        "title": "Nuvio",
         "width": 1280,
         "height": 820,
         "minWidth": 840,
@@ -23,12 +23,42 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob: https: http:; media-src 'self' data: blob: https: http:; frame-src https://www.youtube-nocookie.com; connect-src ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["assets/Nuvio-icon.png", "assets/nuvio.ico"]
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "Nuvio",
+    "shortDescription": "Nuvio desktop streaming client",
+    "longDescription": "A native Nuvio desktop client powered by Tauri, React and libmpv.",
+    "icon": [
+      "assets/Nuvio-icon.png",
+      "assets/nuvio.ico"
+    ],
+    "resources": {
+      "../../../composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll": "libmpv-2.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerIcon": "assets/nuvio.ico",
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0MTQwRkZCRUQ0QzA5RkQKUldUOUNVenQrdzhVZEJBekZTTlRDOG5MZWpacXBMMlRmeVhlVmozSXZ5WVFVTG1KdUZRbUErOUgK",
+      "endpoints": [
+        "https://github.com/lucaboox/nuvio-rust-webview-poc/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

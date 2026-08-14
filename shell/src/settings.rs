@@ -89,10 +89,10 @@ fn poster_style(blob: &Value) -> Value {
 /// should look exactly like one it wrote — and, critically, the hover-preview
 /// fields must survive a desktop write untouched.
 fn normalized_poster_style(style: &Value) -> Map<String, Value> {
-    let read_i64 = |key: &str, fallback: i64| style.get(key).and_then(Value::as_i64).unwrap_or(fallback);
-    let read_bool = |key: &str, fallback: bool| {
-        style.get(key).and_then(Value::as_bool).unwrap_or(fallback)
-    };
+    let read_i64 =
+        |key: &str, fallback: i64| style.get(key).and_then(Value::as_i64).unwrap_or(fallback);
+    let read_bool =
+        |key: &str, fallback: bool| style.get(key).and_then(Value::as_bool).unwrap_or(fallback);
     let width = read_i64("widthDp", DEFAULT_POSTER_WIDTH);
     let mut object = Map::new();
     object.insert("widthDp".to_string(), json!(width));
@@ -138,7 +138,9 @@ fn set_poster_style(blob: &mut Value, key: &str, value: Value) -> Result<()> {
     let mut style = normalized_poster_style(&poster_style(blob));
     match key {
         "posterWidth" => {
-            let width = value.as_i64().context("poster width must be a whole number")?;
+            let width = value
+                .as_i64()
+                .context("poster width must be a whole number")?;
             bail_unless(
                 (80..=240).contains(&width),
                 "poster width must be between 80 and 240",
@@ -147,7 +149,9 @@ fn set_poster_style(blob: &mut Value, key: &str, value: Value) -> Result<()> {
             style.insert("heightDp".to_string(), json!(width * 3 / 2));
         }
         "posterCornerRadius" => {
-            let radius = value.as_i64().context("corner radius must be a whole number")?;
+            let radius = value
+                .as_i64()
+                .context("corner radius must be a whole number")?;
             bail_unless(
                 (0..=32).contains(&radius),
                 "corner radius must be between 0 and 32",
@@ -157,15 +161,21 @@ fn set_poster_style(blob: &mut Value, key: &str, value: Value) -> Result<()> {
         "posterHideLabels" => {
             style.insert(
                 "hideLabelsEnabled".to_string(),
-                json!(value.as_bool().context("hide labels must be true or false")?),
+                json!(
+                    value
+                        .as_bool()
+                        .context("hide labels must be true or false")?
+                ),
             );
         }
         "posterLandscapeCatalogs" => {
             style.insert(
                 "catalogLandscapeModeEnabled".to_string(),
-                json!(value
-                    .as_bool()
-                    .context("landscape posters must be true or false")?),
+                json!(
+                    value
+                        .as_bool()
+                        .context("landscape posters must be true or false")?
+                ),
             );
         }
         _ => bail!("unknown poster setting"),
@@ -423,11 +433,7 @@ fn snapshot(blob: &Value) -> SettingsSnapshot {
         autoplay_source: player_string(blob, "stream_auto_play_source", "ALL_SOURCES"),
         autoplay_regex: player_string(blob, "stream_auto_play_regex", ""),
         autoplay_timeout_seconds: player_int(blob, "stream_auto_play_timeout_seconds", 3),
-        autoplay_prefer_binge_group: player_bool(
-            blob,
-            "stream_auto_play_prefer_binge_group",
-            true,
-        ),
+        autoplay_prefer_binge_group: player_bool(blob, "stream_auto_play_prefer_binge_group", true),
         autoplay_reuse_binge_group: player_bool(blob, "stream_auto_play_reuse_binge_group", true),
         autoplay_next_episode_fallback: player_bool(
             blob,
@@ -492,11 +498,7 @@ fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
         ),
         "skipIntro" => ("player_settings", "skip_intro_enabled", Kind::Boolean),
         "subtitleTextColor" => ("player_settings", "subtitle_text_color", Kind::String),
-        "subtitleBackgroundColor" => (
-            "player_settings",
-            "subtitle_background_color",
-            Kind::String,
-        ),
+        "subtitleBackgroundColor" => ("player_settings", "subtitle_background_color", Kind::String),
         "subtitleOutlineColor" => ("player_settings", "subtitle_outline_color", Kind::String),
         "subtitleOutlineWidth" => ("player_settings", "subtitle_outline_width", Kind::Int),
         "subtitleBottomOffset" => ("player_settings", "subtitle_bottom_offset", Kind::Int),
@@ -802,7 +804,10 @@ mod tests {
             ("autoplaySource", json!("WHATEVER")),
         ] {
             let (_, _, kind) = setting_path(key).expect(key);
-            assert!(validate_value(key, value, kind).is_err(), "{key} should be rejected");
+            assert!(
+                validate_value(key, value, kind).is_err(),
+                "{key} should be rejected"
+            );
         }
     }
 
@@ -846,7 +851,9 @@ mod tests {
         set_poster_style(&mut blob, "posterCornerRadius", json!(16)).unwrap();
 
         // Nuvio decodes this field as a String, so it must not become an object.
-        let raw = blob.pointer(&format!("/features/{POSTER_PAYLOAD_KEY}")).unwrap();
+        let raw = blob
+            .pointer(&format!("/features/{POSTER_PAYLOAD_KEY}"))
+            .unwrap();
         assert!(raw.is_string());
 
         let style = poster_style(&blob);

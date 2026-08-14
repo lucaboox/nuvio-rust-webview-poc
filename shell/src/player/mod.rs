@@ -76,7 +76,7 @@ pub struct PlayerService {
     parent_hwnd: isize,
     state: Arc<Mutex<PlayerState>>,
     #[cfg(windows)]
-    commands: Option<std::sync::mpsc::Sender<native::PlayerCommand>>,
+    runtime: Option<native::PlayerRuntime>,
 }
 
 impl Default for PlayerService {
@@ -90,7 +90,7 @@ impl Default for PlayerService {
                 ..Default::default()
             })),
             #[cfg(windows)]
-            commands: None,
+            runtime: None,
         }
     }
 }
@@ -111,7 +111,7 @@ impl PlayerService {
     pub fn capabilities(&self) -> PlayerCapabilities {
         PlayerCapabilities {
             backend: "embedded native libmpv",
-            direct_mpv_ready: cfg!(windows),
+            direct_mpv_ready: direct_mpv_available(),
             integration: "Rust-owned child HWND inside the main Nuvio window",
         }
     }
@@ -132,8 +132,21 @@ impl PlayerService {
         subtitle_style: SubtitleStyle,
         on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
-        let url = url.filter(|value| value.starts_with("http://") || value.starts_with("https://"))
-            .ok_or_else(|| anyhow::anyhow!("This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."))?;
+        let url = url.ok_or_else(|| {
+            anyhow::anyhow!(
+                "This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."
+            )
+        })?;
+        let parsed = url::Url::parse(&url).map_err(|_| anyhow::anyhow!("Invalid stream URL"))?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some(),
+            "This source is not a direct HTTP stream. Torrent/debrid resolution is not ported yet."
+        );
+        anyhow::ensure!(
+            parsed.username().is_empty() && parsed.password().is_none(),
+            "Stream URLs cannot contain embedded credentials"
+        );
+        crate::content::validate_addon_url(&parsed)?;
         anyhow::ensure!(self.parent_hwnd != 0, "main window handle is unavailable");
         self.stop();
         self.prepared_media_id = Some(media_id.clone());
@@ -149,8 +162,11 @@ impl PlayerService {
         }
         #[cfg(windows)]
         {
-            self.commands = Some(native::launch(
+            let dll =
+                native::find_mpv().ok_or_else(|| anyhow::anyhow!("libmpv-2.dll was not found"))?;
+            self.runtime = Some(native::launch(
                 self.parent_hwnd,
+                dll,
                 url,
                 request_headers,
                 start_position_ms,
@@ -166,11 +182,11 @@ impl PlayerService {
 
     #[cfg(windows)]
     fn send(&self, command: native::PlayerCommand) -> anyhow::Result<()> {
-        self.commands
+        self.runtime
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No active player"))?
+            .commands
             .send(command)
-            .map_err(|_| anyhow::anyhow!("The native player is no longer running"))
     }
 
     pub fn toggle_pause(&self) -> anyhow::Result<()> {
@@ -219,20 +235,31 @@ impl PlayerService {
         self.source.clone()
     }
 
-
     pub fn set_speed(&self, speed: f64) -> anyhow::Result<()> {
         self.send(native::PlayerCommand::SetSpeed(speed.clamp(0.25, 4.0)))
     }
 
     pub fn stop(&mut self) {
         #[cfg(windows)]
-        if let Some(commands) = self.commands.take() {
-            let _ = commands.send(native::PlayerCommand::Stop);
+        if let Some(runtime) = self.runtime.take() {
+            runtime.stop();
         }
         self.prepared_media_id = None;
+        self.source = None;
         if let Ok(mut state) = self.state.lock() {
             state.active = false;
             state.loading = false;
         }
+    }
+}
+
+fn direct_mpv_available() -> bool {
+    #[cfg(windows)]
+    {
+        native::find_mpv().is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }

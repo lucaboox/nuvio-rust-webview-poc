@@ -43,7 +43,7 @@ export type SettingSection = {
   subtitle: string;
   groups: SettingGroup[];
   /** Sections whose body is a bespoke component rather than a control list. */
-  custom?: "homeLayout" | "collections";
+  custom?: "homeLayout" | "collections" | "updates";
 };
 
 const LANGUAGES = [
@@ -597,6 +597,15 @@ export const SECTIONS: SettingSection[] = [
         ],
       },
     ],
+  },
+  {
+    id: "updates",
+    label: "Updates",
+    icon: "refresh",
+    scope: "local",
+    subtitle: "Version information and signed application updates.",
+    custom: "updates",
+    groups: [],
   },
 ];
 

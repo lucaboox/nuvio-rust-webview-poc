@@ -15,7 +15,7 @@ use crate::{
 pub struct AppState {
     pub started_at: Instant,
     pub ping_count: u64,
-    pub player: PlayerService,
+    pub player: Arc<Mutex<PlayerService>>,
     pub auth: AuthService,
     pub profiles: Vec<NuvioProfile>,
     pub active_profile_index: i32,
@@ -33,7 +33,7 @@ impl Default for AppState {
         Self {
             started_at: Instant::now(),
             ping_count: 0,
-            player: PlayerService::default(),
+            player: Arc::new(Mutex::new(PlayerService::default())),
             auth: AuthService::default(),
             profiles: Vec::new(),
             active_profile_index: 1,
@@ -52,8 +52,19 @@ impl AppState {
             return Ok(());
         }
         self.session_restore_attempted = true;
-        if self.auth.restore_session()? {
-            self.refresh_account_data()?;
+        let restored = self.auth.restore_session();
+        let restored = match restored {
+            Ok(restored) => restored,
+            Err(error) => {
+                // A transient network/backend failure must remain retryable in
+                // this process and must not be treated as a logged-out account.
+                self.session_restore_attempted = false;
+                return Err(error);
+            }
+        };
+        if restored && let Err(error) = self.refresh_account_data() {
+            self.session_restore_attempted = false;
+            return Err(error);
         }
         Ok(())
     }

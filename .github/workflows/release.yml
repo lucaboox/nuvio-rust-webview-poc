@@ -1,0 +1,68 @@
+name: Release Nuvio
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-latest
+    env:
+      NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
+      NUVIO_SUPABASE_FALLBACK_URL: ${{ vars.NUVIO_SUPABASE_FALLBACK_URL }}
+      NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shell -> shell/target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate version and source
+        shell: pwsh
+        run: |
+          $version = (Get-Content shell/tauri.conf.json | ConvertFrom-Json).version
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match app version v$version"
+          }
+          if (-not $env:NUVIO_SUPABASE_URL -or -not $env:NUVIO_SUPABASE_ANON_KEY) {
+            throw "Configure NUVIO_SUPABASE_URL and NUVIO_SUPABASE_ANON_KEY repository variables before publishing"
+          }
+          npm run check:ui
+          cargo test --manifest-path shell/Cargo.toml --locked
+
+      - name: Build signed installer and publish release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: .
+          tauriScript: npm run tauri
+          args: --config shell/tauri.conf.json --bundles nsis
+          tagName: v__VERSION__
+          releaseName: Nuvio __VERSION__
+          releaseBody: Install Nuvio with the Windows setup executable below. Existing installations can update from Settings > Updates.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true

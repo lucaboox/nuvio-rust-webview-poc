@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{env, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, Response};
@@ -18,22 +18,25 @@ struct BackendConfig {
 
 impl BackendConfig {
     fn load() -> Option<Self> {
-        let env_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.env.local");
-        let _ = dotenvy::from_path(env_path);
-
-        let primary_url = env::var("NUVIO_SUPABASE_URL")
-            .ok()?
+        let primary_url = config_value("NUVIO_SUPABASE_URL", option_env!("NUVIO_SUPABASE_URL"))?
             .trim()
             .trim_end_matches('/')
             .to_string();
-        let anon_key = env::var("NUVIO_SUPABASE_ANON_KEY").ok()?.trim().to_string();
+        let anon_key = config_value(
+            "NUVIO_SUPABASE_ANON_KEY",
+            option_env!("NUVIO_SUPABASE_ANON_KEY"),
+        )?
+        .trim()
+        .to_string();
         if primary_url.is_empty() || anon_key.is_empty() {
             return None;
         }
-        let fallback_url = env::var("NUVIO_SUPABASE_FALLBACK_URL")
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty() && value != &primary_url);
+        let fallback_url = config_value(
+            "NUVIO_SUPABASE_FALLBACK_URL",
+            option_env!("NUVIO_SUPABASE_FALLBACK_URL"),
+        )
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty() && value != &primary_url);
         Some(Self {
             primary_url,
             fallback_url,
@@ -44,6 +47,13 @@ impl BackendConfig {
     fn base_urls(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.primary_url.as_str()).chain(self.fallback_url.as_deref())
     }
+}
+
+fn config_value(name: &str, compiled: Option<&'static str>) -> Option<String> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| compiled.map(str::to_string))
 }
 
 #[derive(Clone, Debug)]
@@ -231,12 +241,15 @@ impl AuthService {
                 .json(&json!({ "refresh_token": refresh_token }))
                 .send()
         });
-        let payload = match response.and_then(decode_success::<AuthTokenResponse>) {
+        let response = response?;
+        let status = response.status();
+        let payload = match decode_success::<AuthTokenResponse>(response) {
             Ok(payload) => payload,
-            Err(_) => {
+            Err(_) if matches!(status.as_u16(), 400 | 401 | 403) => {
                 clear_refresh_token();
                 return Ok(false);
             }
+            Err(error) => return Err(error),
         };
         if self.install_session(payload)? {
             return Ok(true);
@@ -293,15 +306,16 @@ impl AuthService {
     }
 
     pub fn sign_out(&mut self) {
-        if let (Some(config), Some(session)) = (&self.config, &self.session) {
-            if !session.user.is_anonymous && !session.access_token.is_empty() {
-                let _ = self
-                    .client
-                    .post(format!("{}/auth/v1/logout", config.primary_url))
-                    .header("apikey", &config.anon_key)
-                    .bearer_auth(&session.access_token)
-                    .send();
-            }
+        if let (Some(config), Some(session)) = (&self.config, &self.session)
+            && !session.user.is_anonymous
+            && !session.access_token.is_empty()
+        {
+            let _ = self
+                .client
+                .post(format!("{}/auth/v1/logout", config.primary_url))
+                .header("apikey", &config.anon_key)
+                .bearer_auth(&session.access_token)
+                .send();
         }
         self.session = None;
         clear_refresh_token();

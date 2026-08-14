@@ -86,7 +86,10 @@ impl SyncCatalogItem {
         if self.is_collection {
             format!("{COLLECTION_KEY_PREFIX}{}", self.collection_id)
         } else {
-            format!("{}:{}:{}", self.addon_id, self.content_type, self.catalog_id)
+            format!(
+                "{}:{}:{}",
+                self.addon_id, self.content_type, self.catalog_id
+            )
         }
     }
 }
@@ -447,10 +450,7 @@ impl HomeLayout {
     }
 
     fn default_preference_for_missing_key(&self, key: &str) -> Option<Preference> {
-        let is_catalog = self
-            .catalogs
-            .iter()
-            .any(|definition| definition.key == key);
+        let is_catalog = self.catalogs.iter().any(|definition| definition.key == key);
         let is_collection = self
             .collections
             .iter()
@@ -640,7 +640,11 @@ impl HomeLayout {
                     subtitle: format!(
                         "Collection • {} folder{}",
                         definition.folder_count,
-                        if definition.folder_count == 1 { "" } else { "s" }
+                        if definition.folder_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
                     ),
                     enabled: preference.map(|value| value.enabled).unwrap_or(true),
                     hero_source_enabled: false,
@@ -1174,8 +1178,12 @@ pub fn apply(
         return Ok(layout);
     }
 
-    mutate(auth, profile_id, catalogs, collections, |layout| {
-        match mutation {
+    mutate(
+        auth,
+        profile_id,
+        catalogs,
+        collections,
+        |layout| match mutation {
             Mutation::SetEnabled { key, enabled } => layout.set_enabled(key, enabled),
             Mutation::SetCustomTitle { key, title } => layout.set_custom_title(key, title),
             Mutation::SetShowCatalogType(enabled) => {
@@ -1192,8 +1200,8 @@ pub fn apply(
                 Ok(())
             }
             Mutation::SetHeroEnabled(_) | Mutation::SetHeroSourceEnabled { .. } => unreachable!(),
-        }
-    })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,7 +1220,10 @@ pub fn is_unreleased(released: Option<&str>, release_info: Option<&str>) -> bool
     {
         return day > today;
     }
-    let Some(info) = release_info.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(info) = release_info
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return false;
     };
     if let Some(day) = parse_epoch_day(info) {

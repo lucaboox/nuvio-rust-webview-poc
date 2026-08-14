@@ -1,13 +1,14 @@
-# Nuvio Rust/WebView2 POC
+# Nuvio Desktop Alpha
 
-An isolated Windows desktop architecture experiment. Read [ARCHITECTURE.md](./ARCHITECTURE.md) first for the repository audit, reuse boundaries, IPC design, player adaptation, and staged migration plan.
+An experimental Windows desktop client built with Rust, Tauri, React, TypeScript, WebView2, and direct libmpv playback. Read [ARCHITECTURE.md](./ARCHITECTURE.md) for the original repository audit, reuse boundaries, IPC design, player adaptation, and staged migration plan.
+
+The install/update release process is documented in [RELEASING.md](./RELEASING.md). The current application version is **0.1 Alpha 1** (`0.1.0-alpha.1`).
 
 ## What works
 
-- Rust owns a native Tao window.
-- Wry hosts the React UI using the installed Microsoft WebView2 runtime.
-- UI assets are embedded into the Rust binary at compile time and served through the `nuvio://` application protocol.
-- React calls typed native commands through `window.ipc.postMessage`.
+- Tauri owns the native window and hosts React through the installed Microsoft WebView2 runtime.
+- UI assets are embedded into the release binary.
+- React calls the existing typed Rust command bridge through Tauri IPC.
 - Rust returns correlated responses and unsolicited events to JavaScript.
 - The UI provides a responsive Nuvio-style navigation and real addon-backed home shell.
 - Email/password sign-in and sign-up use Nuvio's real Supabase Auth endpoint.
@@ -20,7 +21,8 @@ An isolated Windows desktop architecture experiment. Read [ARCHITECTURE.md](./AR
 - Core playback, subtitle, stream-badge, and notification settings read and update Nuvio's versioned desktop profile blob while preserving unknown fields.
 - The gray desktop theme includes a synced AMOLED-black option.
 - Library items use Nuvio's existing profile-scoped sync RPCs and can be added or removed from Details.
-- Direct HTTP streams open in a Rust-owned native Windows/libmpv window; saved progress selects the resume episode and seeks to the saved position, then syncs the final position when the player closes.
+- Direct HTTP streams render through libmpv inside the main window; saved progress selects the resume episode, seeks to the saved position, and syncs playback progress.
+- Signed application updates can be checked and installed from **Settings > Updates**.
 
 This remains an incremental POC: it supports Stremio-compatible addon HTTP resources but does not execute Nuvio QuickJS plugins, and torrent-only sources still need a resolver/debrid layer before libmpv can open them. The Supabase refresh token is stored in Windows Credential Manager; access tokens remain memory-only and sign-out removes the saved credential.
 
@@ -39,10 +41,10 @@ npm.cmd install
 npm.cmd run check:ui
 npm.cmd run build:ui
 cargo test --manifest-path shell/Cargo.toml
-cargo run --manifest-path shell/Cargo.toml
+npm.cmd run tauri -- dev --config shell/tauri.conf.json
 ```
 
-The UI must be built before Cargo because the shell embeds `ui/dist` at compile time. `npm.cmd run dev` performs the UI build and launches the shell in one command.
+The UI must be built before a direct Cargo build because the shell embeds `ui/dist` at compile time. The Tauri development command handles this through `beforeBuildCommand`.
 
 The local `.env.local` contains the same public Supabase client URL and anon key embedded in official Nuvio builds. It is ignored by Git. Use `.env.example` when configuring another checkout.
 
@@ -51,5 +53,4 @@ Sign in with an existing Nuvio account to test real profiles and the read-only A
 ## Development notes
 
 - `npm.cmd run dev:ui` can preview the React layout in a browser, but native bridge actions will correctly report that the bridge is unavailable.
-- Debug Rust builds enable WebView devtools through Wry.
-- IPC work is dispatched off the Tao UI thread and returned through its event-loop proxy. Addon requests fan out concurrently while preserving stable display order.
+- IPC work is dispatched away from the WebView UI thread. Addon requests fan out concurrently while preserving stable display order.

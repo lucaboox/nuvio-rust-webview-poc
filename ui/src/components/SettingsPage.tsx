@@ -9,6 +9,7 @@ import type {
 } from "../bridge/types";
 import { CollectionSettingsSection } from "./CollectionsPage";
 import { HomeLayoutSection } from "./HomeLayoutPage";
+import { UpdatesSection } from "./UpdatesSection";
 import { Icon } from "./Icon";
 import { setClientSetting, useClientSettings } from "../data/clientSettings";
 import type { ClientSettings } from "../data/clientSettings";
@@ -264,6 +265,8 @@ export function SettingsPage({
               onReorderCatalog={onReorderCatalog}
               onFolder={onOpenFolder}
             />
+          ) : section.custom === "updates" ? (
+            <UpdatesSection />
           ) : (
             section.groups.map((group) => (
               <section className="settings-group" key={group.title}>

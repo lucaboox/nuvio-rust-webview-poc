@@ -1,7 +1,7 @@
 {
   "name": "nuvio-rust-webview-poc",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "type": "module",
   "scripts": {
     "build:ui": "vite build",
@@ -11,14 +11,19 @@
     "dev": "npm run build:ui && cargo run --manifest-path shell/Cargo.toml",
     "tauri": "tauri",
     "bundle": "tauri build --config shell/tauri.conf.json",
+    "version:set": "node scripts/set-version.mjs",
     "test:shell": "cargo test --manifest-path shell/Cargo.toml"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "lucide-react": "^1.31.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.2",

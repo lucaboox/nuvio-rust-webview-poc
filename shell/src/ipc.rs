@@ -39,6 +39,91 @@ pub enum OutboundMessage {
     Event(EventEnvelope),
 }
 
+/// Player controls use their own lock and bypass account/content work. This
+/// keeps seek, volume, pause, and track selection responsive while an unrelated
+/// Supabase or addon request is in flight.
+pub fn handle_player_shared(
+    raw: &str,
+    shared_state: &Arc<Mutex<AppState>>,
+) -> Option<Vec<OutboundMessage>> {
+    let request = serde_json::from_str::<RequestEnvelope>(raw).ok()?;
+    if !request.method.starts_with("player.")
+        || matches!(
+            request.method.as_str(),
+            "player.prepare" | "player.thumbnail" | "player.skipSegments"
+        )
+    {
+        return None;
+    }
+    let player = Arc::clone(&shared_state.lock().ok()?.player);
+    let mut player = player.lock().ok()?;
+    let response = handle_player_command(&request, &mut player)?;
+    Some(vec![OutboundMessage::Response(response)])
+}
+
+fn handle_player_command(
+    request: &RequestEnvelope,
+    player: &mut crate::player::PlayerService,
+) -> Option<ResponseEnvelope> {
+    let id = request.id.clone();
+    let response = match request.method.as_str() {
+        "player.capabilities" => success(id, json!(player.capabilities())),
+        "player.state" => success(id, json!(player.state())),
+        "player.togglePause" => unit_result(id, player.toggle_pause()),
+        "player.seek" => unit_result(
+            id,
+            player.seek(
+                request
+                    .params
+                    .get("positionMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+            ),
+        ),
+        "player.seekRelative" => unit_result(
+            id,
+            player.seek_relative(
+                request
+                    .params
+                    .get("offsetMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+            ),
+        ),
+        "player.setVolume" => unit_result(
+            id,
+            player.set_volume(
+                request
+                    .params
+                    .get("volume")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(100),
+            ),
+        ),
+        "player.toggleMute" => unit_result(id, player.toggle_mute()),
+        "player.cycleAudio" => unit_result(id, player.cycle_audio()),
+        "player.cycleSubtitle" => unit_result(id, player.cycle_subtitle()),
+        "player.setSpeed" => match request.params.get("speed").and_then(Value::as_f64) {
+            Some(speed) => unit_result(id, player.set_speed(speed)),
+            None => failure(id, "invalid_params", "A speed is required".to_string()),
+        },
+        "player.setAudioTrack" => match request.params.get("id").and_then(Value::as_i64) {
+            Some(track) => unit_result(id, player.set_audio_track(track)),
+            None => failure(id, "invalid_params", "A track id is required".to_string()),
+        },
+        "player.setSubtitleTrack" => match request.params.get("id").and_then(Value::as_i64) {
+            Some(track) => unit_result(id, player.set_subtitle_track(track)),
+            None => failure(id, "invalid_params", "A track id is required".to_string()),
+        },
+        "player.stop" => {
+            player.stop();
+            success(id, json!({ "stopped": true }))
+        }
+        _ => return None,
+    };
+    Some(response)
+}
+
 /// Runs addon HTTP work behind its own lock so a slow catalog cannot block
 /// profile switching, settings, window commands, or other account IPC.
 pub fn handle_content_shared(
@@ -72,7 +157,8 @@ pub fn handle_content_shared(
             .get("positionMs")
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let source = shared_state.lock().ok()?.player.source();
+        let player = Arc::clone(&shared_state.lock().ok()?.player);
+        let source = player.lock().ok()?.source();
         let dll = crate::player::find_mpv();
         let response = match (source, dll) {
             (Some((url, headers)), Some(dll)) => {
@@ -299,7 +385,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 "architecture": "Rust + Wry + React",
                 "platform": std::env::consts::OS,
                 "protocolVersion": 2,
-                "player": state.player.capabilities(),
+                "player": state.player.lock().map(|player| player.capabilities()).ok(),
                 "auth": state.auth.snapshot(),
                 "profiles": state.profiles,
                 "activeProfileIndex": state.active_profile_index,
@@ -627,9 +713,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     _ => None,
                 },
                 "setHeroSourceEnabled" => match (key, flag) {
-                    (Some(key), Some(enabled)) => Some(
-                        crate::home_layout::Mutation::SetHeroSourceEnabled { key, enabled },
-                    ),
+                    (Some(key), Some(enabled)) => {
+                        Some(crate::home_layout::Mutation::SetHeroSourceEnabled { key, enabled })
+                    }
                     _ => None,
                 },
                 "setCustomTitle" => match (key, string_param(&request.params, "title")) {
@@ -1011,67 +1097,30 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 ),
             }
         }
-        "player.capabilities" => success(id, json!(state.player.capabilities())),
-        "player.state" => success(id, json!(state.player.state())),
-        "player.togglePause" => unit_result(id, state.player.toggle_pause()),
-        "player.seek" => unit_result(
-            id,
-            state.player.seek(
-                request
-                    .params
-                    .get("positionMs")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-            ),
-        ),
-        "player.seekRelative" => unit_result(
-            id,
-            state.player.seek_relative(
-                request
-                    .params
-                    .get("offsetMs")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-            ),
-        ),
-        "player.setVolume" => unit_result(
-            id,
-            state.player.set_volume(
-                request
-                    .params
-                    .get("volume")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(100),
-            ),
-        ),
-        "player.toggleMute" => unit_result(id, state.player.toggle_mute()),
-        "player.cycleAudio" => unit_result(id, state.player.cycle_audio()),
-        "player.cycleSubtitle" => unit_result(id, state.player.cycle_subtitle()),
-        "player.setSpeed" => {
-            let speed = request.params.get("speed").and_then(Value::as_f64);
-            match speed {
-                Some(speed) => unit_result(id, state.player.set_speed(speed)),
-                None => failure(id, "invalid_params", "A speed is required".to_string()),
-            }
-        }
-        "player.setAudioTrack" => {
-            let track = request.params.get("id").and_then(Value::as_i64);
-            match track {
-                Some(track) => unit_result(id, state.player.set_audio_track(track)),
-                None => failure(id, "invalid_params", "A track id is required".to_string()),
-            }
-        }
-        "player.setSubtitleTrack" => {
-            let track = request.params.get("id").and_then(Value::as_i64);
-            match track {
-                Some(track) => unit_result(id, state.player.set_subtitle_track(track)),
-                None => failure(id, "invalid_params", "A track id is required".to_string()),
-            }
-        }
-        "player.stop" => {
-            state.player.stop();
-            success(id, json!({ "stopped": true }))
-        }
+        "player.capabilities"
+        | "player.state"
+        | "player.togglePause"
+        | "player.seek"
+        | "player.seekRelative"
+        | "player.setVolume"
+        | "player.toggleMute"
+        | "player.cycleAudio"
+        | "player.cycleSubtitle"
+        | "player.setSpeed"
+        | "player.setAudioTrack"
+        | "player.setSubtitleTrack"
+        | "player.stop" => state
+            .player
+            .lock()
+            .ok()
+            .and_then(|mut player| handle_player_command(&request, &mut player))
+            .unwrap_or_else(|| {
+                failure(
+                    id,
+                    "player_unavailable",
+                    "Player lock was interrupted".to_string(),
+                )
+            }),
         "player.prepare" => {
             let media_id = request
                 .params
@@ -1096,26 +1145,12 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 .get("startPositionMs")
                 .and_then(Value::as_i64)
                 .unwrap_or_default();
-            let request_headers = request
-                .params
-                .get("requestHeaders")
-                .and_then(Value::as_object)
-                .map(|headers| {
-                    headers
-                        .iter()
-                        .filter_map(|(name, value)| {
-                            let value = value.as_str()?;
-                            (!name.contains(['\r', '\n']) && !value.contains(['\r', '\n']))
-                                .then(|| format!("{name}: {value}"))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let request_headers = player_request_headers(&request.params);
             let identity = request.params.get("progress").cloned().and_then(|value| {
                 serde_json::from_value::<crate::progress::PlaybackIdentity>(value).ok()
             });
-            match (media_id, identity) {
-                (Some(media_id), Some(identity)) => {
+            match (media_id, identity, request_headers) {
+                (Some(media_id), Some(identity), Ok(request_headers)) => {
                     // Captured at prepare time so progress lands on the profile that
                     // started playback, even if the user switches profiles mid-episode.
                     let auth = state.auth.clone();
@@ -1136,31 +1171,38 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                                 use_libass: snapshot.use_libass,
                             })
                             .unwrap_or_default();
-                    match state.player.prepare(
-                        media_id.to_string(),
-                        url,
-                        request_headers,
-                        start_position_ms,
-                        subtitle_style,
-                        // Fires once, as the playback loop tears down. Progress mid-episode
-                        // is not checkpointed, so a crash loses the session.
-                        Box::new(move |position, duration, reached_eof| {
-                            if let Err(error) = crate::progress::push(
-                                &auth,
-                                profile_id,
-                                &identity,
-                                position,
-                                duration,
-                                reached_eof,
-                            ) {
-                                eprintln!("watch progress push failed: {error:#}");
-                            }
-                        }),
-                    ) {
+                    match state
+                        .player
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Player lock was interrupted"))
+                        .and_then(|mut player| {
+                            player.prepare(
+                                media_id.to_string(),
+                                url,
+                                request_headers,
+                                start_position_ms,
+                                subtitle_style,
+                                // Fires once, as the playback loop tears down. Progress mid-episode
+                                // is not checkpointed, so a crash loses the session.
+                                Box::new(move |position, duration, reached_eof| {
+                                    if let Err(error) = crate::progress::push(
+                                        &auth,
+                                        profile_id,
+                                        &identity,
+                                        position,
+                                        duration,
+                                        reached_eof,
+                                    ) {
+                                        eprintln!("watch progress push failed: {error:#}");
+                                    }
+                                }),
+                            )
+                        }) {
                         Ok(status) => success(id, json!({ "status": status })),
                         Err(error) => failure(id, "playback_failed", error.to_string()),
                     }
                 }
+                (_, _, Err(error)) => failure(id, "invalid_params", error.to_string()),
                 _ => failure(
                     id,
                     "invalid_params",
@@ -1188,6 +1230,65 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
     outbound
 }
 
+fn player_request_headers(params: &Value) -> anyhow::Result<Vec<String>> {
+    let Some(headers) = params.get("requestHeaders").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    anyhow::ensure!(
+        headers.len() <= 32,
+        "A stream may provide at most 32 request headers"
+    );
+    let mut output = Vec::with_capacity(headers.len());
+    let mut total_length = 0usize;
+    for (name, value) in headers {
+        let value = value
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Stream header values must be text"))?;
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b'!' | b'#'
+                                | b'$'
+                                | b'%'
+                                | b'&'
+                                | b'\''
+                                | b'*'
+                                | b'+'
+                                | b'-'
+                                | b'.'
+                                | b'^'
+                                | b'_'
+                                | b'`'
+                                | b'|'
+                                | b'~'
+                        )
+                }),
+            "Stream contains an invalid request-header name"
+        );
+        anyhow::ensure!(
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade"
+            ),
+            "Stream cannot override the {name} request header"
+        );
+        anyhow::ensure!(
+            !value.contains(['\r', '\n']) && value.len() <= 4096,
+            "Stream contains an invalid request-header value"
+        );
+        total_length += name.len() + value.len() + 2;
+        anyhow::ensure!(
+            total_length <= 16 * 1024,
+            "Stream request headers are too large"
+        );
+        output.push(format!("{name}: {value}"));
+    }
+    Ok(output)
+}
+
 fn unit_result(id: String, result: anyhow::Result<()>) -> ResponseEnvelope {
     match result {
         Ok(()) => success(id, json!({ "ok": true })),
@@ -1197,8 +1298,7 @@ fn unit_result(id: String, result: anyhow::Result<()>) -> ResponseEnvelope {
 
 /// Small base64 encoder so the JPEG can ride the JSON bridge as a data URI.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -1209,8 +1309,16 @@ fn base64(bytes: &[u8]) -> String {
         let triple = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
         out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(triple >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[triple as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(triple >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[triple as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -1299,5 +1407,33 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.error.as_ref().unwrap().code, "method_not_found");
+    }
+
+    #[test]
+    fn player_headers_reject_transport_overrides_and_injection() {
+        assert!(
+            player_request_headers(&json!({ "requestHeaders": { "Host": "internal" } })).is_err()
+        );
+        assert!(
+            player_request_headers(&json!({ "requestHeaders": { "X-Test": "ok\r\nbad: yes" } }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn player_headers_keep_auth_and_referer_values() {
+        let headers = player_request_headers(&json!({
+            "requestHeaders": {
+                "Authorization": "Bearer example",
+                "Referer": "https://example.com/"
+            }
+        }))
+        .unwrap();
+        assert_eq!(headers.len(), 2);
+        assert!(
+            headers
+                .iter()
+                .any(|header| header == "Authorization: Bearer example")
+        );
     }
 }

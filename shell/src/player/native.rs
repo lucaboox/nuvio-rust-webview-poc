@@ -2,7 +2,7 @@ use std::{
     ffi::{CString, c_char, c_void},
     path::PathBuf,
     ptr,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -31,6 +31,106 @@ pub enum PlayerCommand {
     Stop,
 }
 
+#[derive(Default)]
+struct PendingCommands {
+    stop: bool,
+    toggle_pause: bool,
+    seek: Option<PlayerCommand>,
+    volume: Option<i64>,
+    toggle_mute: bool,
+    audio: Option<PlayerCommand>,
+    subtitle: Option<PlayerCommand>,
+    speed: Option<f64>,
+}
+
+/// A bounded, coalescing mailbox for UI controls. Slider input can generate
+/// hundreds of seek/volume requests per second; retaining only the newest
+/// value prevents stale commands from being replayed after the user lets go.
+#[derive(Clone, Default)]
+pub struct PlayerCommands {
+    pending: Arc<Mutex<PendingCommands>>,
+}
+
+impl PlayerCommands {
+    pub fn send(&self, command: PlayerCommand) -> Result<()> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the native player command mailbox was interrupted"))?;
+        if pending.stop {
+            bail!("the native player is stopping");
+        }
+        match command {
+            PlayerCommand::Stop => {
+                *pending = PendingCommands {
+                    stop: true,
+                    ..Default::default()
+                };
+            }
+            PlayerCommand::TogglePause => pending.toggle_pause = !pending.toggle_pause,
+            command @ (PlayerCommand::Seek(_) | PlayerCommand::SeekRelative(_)) => {
+                pending.seek = Some(command);
+            }
+            PlayerCommand::Volume(value) => pending.volume = Some(value),
+            PlayerCommand::ToggleMute => pending.toggle_mute = !pending.toggle_mute,
+            command @ (PlayerCommand::CycleAudio | PlayerCommand::SetAudio(_)) => {
+                pending.audio = Some(command);
+            }
+            command @ (PlayerCommand::CycleSubtitle | PlayerCommand::SetSubtitle(_)) => {
+                pending.subtitle = Some(command);
+            }
+            PlayerCommand::SetSpeed(value) => pending.speed = Some(value),
+        }
+        Ok(())
+    }
+
+    fn drain(&self) -> Vec<PlayerCommand> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return vec![PlayerCommand::Stop];
+        };
+        if pending.stop {
+            return vec![PlayerCommand::Stop];
+        }
+        let mut commands = Vec::with_capacity(6);
+        if std::mem::take(&mut pending.toggle_pause) {
+            commands.push(PlayerCommand::TogglePause);
+        }
+        if let Some(command) = pending.seek.take() {
+            commands.push(command);
+        }
+        if let Some(value) = pending.volume.take() {
+            commands.push(PlayerCommand::Volume(value));
+        }
+        if std::mem::take(&mut pending.toggle_mute) {
+            commands.push(PlayerCommand::ToggleMute);
+        }
+        if let Some(command) = pending.audio.take() {
+            commands.push(command);
+        }
+        if let Some(command) = pending.subtitle.take() {
+            commands.push(command);
+        }
+        if let Some(value) = pending.speed.take() {
+            commands.push(PlayerCommand::SetSpeed(value));
+        }
+        commands
+    }
+}
+
+pub struct PlayerRuntime {
+    pub commands: PlayerCommands,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl PlayerRuntime {
+    pub fn stop(mut self) {
+        let _ = self.commands.send(PlayerCommand::Stop);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 #[repr(C)]
 struct MpvEvent {
     event_id: i32,
@@ -54,18 +154,34 @@ type MpvGetProperty = unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut
 type MpvFree = unsafe extern "C" fn(*mut c_void);
 type MpvDestroy = unsafe extern "C" fn(*mut c_void);
 
+struct MpvHandle {
+    raw: *mut c_void,
+    destroy: MpvDestroy,
+}
+
+impl Drop for MpvHandle {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe { (self.destroy)(self.raw) };
+            self.raw = ptr::null_mut();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn launch(
     parent_hwnd: isize,
+    dll: PathBuf,
     url: String,
     request_headers: Vec<String>,
     start_position_ms: i64,
     subtitle_style: SubtitleStyle,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
-) -> Result<mpsc::Sender<PlayerCommand>> {
-    let dll = find_mpv().context("libmpv-2.dll was not found")?;
-    let (commands, receiver) = mpsc::channel();
-    thread::Builder::new()
+) -> Result<PlayerRuntime> {
+    let commands = PlayerCommands::default();
+    let player_commands = commands.clone();
+    let join = thread::Builder::new()
         .name("nuvio-embedded-mpv".to_string())
         .spawn(move || {
             if let Err(error) = run_player(
@@ -76,7 +192,7 @@ pub fn launch(
                 start_position_ms,
                 &subtitle_style,
                 &state,
-                receiver,
+                player_commands,
                 on_progress,
             ) {
                 if let Ok(mut current) = state.lock() {
@@ -88,13 +204,26 @@ pub fn launch(
             }
         })
         .context("could not start embedded native player thread")?;
-    Ok(commands)
+    Ok(PlayerRuntime {
+        commands,
+        join: Some(join),
+    })
 }
 
 pub fn find_mpv() -> Option<PathBuf> {
     std::env::var_os("NUVIO_LIBMPV_PATH")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
+        .or_else(|| {
+            let executable = std::env::current_exe().ok()?;
+            let directory = executable.parent()?;
+            [
+                directory.join("libmpv-2.dll"),
+                directory.join("resources/libmpv-2.dll"),
+            ]
+            .into_iter()
+            .find(|path| path.is_file())
+        })
         .or_else(|| {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../../composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll");
@@ -106,6 +235,7 @@ pub fn find_mpv() -> Option<PathBuf> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_player(
     parent: HWND,
     dll_path: &PathBuf,
@@ -114,7 +244,7 @@ fn run_player(
     start_position_ms: i64,
     subtitle_style: &SubtitleStyle,
     state: &Arc<Mutex<PlayerState>>,
-    receiver: mpsc::Receiver<PlayerCommand>,
+    commands: PlayerCommands,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
 ) -> Result<()> {
     unsafe {
@@ -136,10 +266,15 @@ fn run_player(
         // sibling video HWND cannot show through a windowed WebView2 surface.
         let hwnd = parent;
 
-        let handle = mpv_create();
-        if handle.is_null() {
+        let raw_handle = mpv_create();
+        if raw_handle.is_null() {
             bail!("mpv_create failed");
         }
+        let handle_guard = MpvHandle {
+            raw: raw_handle,
+            destroy: mpv_destroy,
+        };
+        let handle = handle_guard.raw;
         set_option(mpv_set_option_string, handle, "config", "no")?;
         set_option(mpv_set_option_string, handle, "osc", "no")?;
         set_option(
@@ -213,7 +348,6 @@ fn run_player(
         if mpv_set_option(handle, wid_name.as_ptr(), 4, (&mut wid as *mut i64).cast()) < 0
             || mpv_initialize(handle) < 0
         {
-            mpv_destroy(handle);
             bail!("libmpv initialization failed");
         }
         // `start` is applied as an option rather than a loadfile argument: the
@@ -243,7 +377,7 @@ fn run_player(
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-            while let Ok(next) = receiver.try_recv() {
+            for next in commands.drain() {
                 match next {
                     PlayerCommand::TogglePause => {
                         let _ = command(mpv_command, handle, &["cycle", "pause"]);
@@ -325,11 +459,12 @@ fn run_player(
                         if !end.is_null() && (*end).reason == 0 {
                             reached_eof = true;
                         }
-                        if !end.is_null() && (*end).error < 0 {
-                            if let Ok(mut current) = state.lock() {
-                                current.loading = false;
-                                current.error = Some(mpv_error_message((*end).error));
-                            }
+                        if !end.is_null()
+                            && (*end).error < 0
+                            && let Ok(mut current) = state.lock()
+                        {
+                            current.loading = false;
+                            current.error = Some(mpv_error_message((*end).error));
                         }
                     }
                     // MPV_EVENT_PLAYBACK_RESTART occurs after playback actually
@@ -385,17 +520,20 @@ fn run_player(
             }
             thread::sleep(Duration::from_millis(15));
         }
-        if position > 0.0 && duration > 0.0 {
-            on_progress(
-                (position * 1000.0) as i64,
-                (duration * 1000.0) as i64,
-                reached_eof,
-            );
-        }
-        mpv_destroy(handle);
+        // Release the native decoder/window before any remote progress sync.
+        // The sync callback can take seconds on a bad network and must not hold
+        // up a replacement player or application shutdown.
+        drop(handle_guard);
         if let Ok(mut current) = state.lock() {
             current.active = false;
             current.loading = false;
+        }
+        if position > 0.0 && duration > 0.0 {
+            let position_ms = (position * 1000.0) as i64;
+            let duration_ms = (duration * 1000.0) as i64;
+            let _ = thread::Builder::new()
+                .name("nuvio-progress-sync".to_string())
+                .spawn(move || on_progress(position_ms, duration_ms, reached_eof));
         }
         Ok(())
     }
@@ -427,7 +565,12 @@ unsafe fn apply_subtitle_style(
             if style.use_libass { "no" } else { "force" },
         )?;
         set_option(set, handle, "sub-font-size", &style.font_size.to_string())?;
-        set_option(set, handle, "sub-bold", if style.bold { "yes" } else { "no" })?;
+        set_option(
+            set,
+            handle,
+            "sub-bold",
+            if style.bold { "yes" } else { "no" },
+        )?;
         set_option(set, handle, "sub-color", &mpv_color(&style.text_color))?;
         set_option(
             set,
@@ -439,7 +582,12 @@ unsafe fn apply_subtitle_style(
             set,
             handle,
             "sub-border-size",
-            &if style.outline_enabled { style.outline_width } else { 0 }.to_string(),
+            &if style.outline_enabled {
+                style.outline_width
+            } else {
+                0
+            }
+            .to_string(),
         )?;
         set_option(
             set,
@@ -475,7 +623,11 @@ fn mpv_error_message(code: i32) -> String {
 
 /// mpv treats `no` as "disabled" for aid/sid; any other value is a track id.
 fn track_value(id: i64) -> String {
-    if id <= 0 { "no".to_string() } else { id.to_string() }
+    if id <= 0 {
+        "no".to_string()
+    } else {
+        id.to_string()
+    }
 }
 
 /// MPV_FORMAT_INT64 = 4.
@@ -483,7 +635,12 @@ unsafe fn get_int(function: MpvGetProperty, handle: *mut c_void, name: &str) -> 
     let name = CString::new(name).ok()?;
     let mut value = 0i64;
     let code = unsafe {
-        function(handle, name.as_ptr(), 4, &mut value as *mut i64 as *mut c_void)
+        function(
+            handle,
+            name.as_ptr(),
+            4,
+            &mut value as *mut i64 as *mut c_void,
+        )
     };
     (code >= 0).then_some(value)
 }
@@ -498,7 +655,12 @@ unsafe fn get_string(
     let name = CString::new(name).ok()?;
     let mut raw: *mut c_char = ptr::null_mut();
     let code = unsafe {
-        function(handle, name.as_ptr(), 1, &mut raw as *mut *mut c_char as *mut c_void)
+        function(
+            handle,
+            name.as_ptr(),
+            1,
+            &mut raw as *mut *mut c_char as *mut c_void,
+        )
     };
     if code < 0 || raw.is_null() {
         return None;
@@ -518,7 +680,8 @@ fn read_tracks(
 ) -> Vec<PlayerTrack> {
     (0..count.max(0))
         .filter_map(|index| {
-            let kind = unsafe { get_string(get, free, handle, &format!("track-list/{index}/type")) }?;
+            let kind =
+                unsafe { get_string(get, free, handle, &format!("track-list/{index}/type")) }?;
             if kind != "audio" && kind != "sub" {
                 return None;
             }
@@ -526,8 +689,10 @@ fn read_tracks(
             Some(PlayerTrack {
                 id,
                 kind,
-                title: unsafe { get_string(get, free, handle, &format!("track-list/{index}/title")) }
-                    .unwrap_or_default(),
+                title: unsafe {
+                    get_string(get, free, handle, &format!("track-list/{index}/title"))
+                }
+                .unwrap_or_default(),
                 lang: unsafe { get_string(get, free, handle, &format!("track-list/{index}/lang")) }
                     .unwrap_or_default(),
                 selected: false,
@@ -605,4 +770,31 @@ unsafe fn get_flag(
 ) -> i32 {
     let name = CString::new(name).unwrap();
     unsafe { function(handle, name.as_ptr(), 3, (output as *mut i32).cast()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_coalesces_slider_commands_to_the_latest_value() {
+        let mailbox = PlayerCommands::default();
+        mailbox.send(PlayerCommand::Seek(1_000)).unwrap();
+        mailbox.send(PlayerCommand::Seek(8_000)).unwrap();
+        mailbox.send(PlayerCommand::Volume(10)).unwrap();
+        mailbox.send(PlayerCommand::Volume(70)).unwrap();
+        let commands = mailbox.drain();
+        assert!(matches!(commands[0], PlayerCommand::Seek(8_000)));
+        assert!(matches!(commands[1], PlayerCommand::Volume(70)));
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn stop_discards_queued_controls() {
+        let mailbox = PlayerCommands::default();
+        mailbox.send(PlayerCommand::Seek(1_000)).unwrap();
+        mailbox.send(PlayerCommand::Stop).unwrap();
+        let commands = mailbox.drain();
+        assert!(matches!(commands.as_slice(), [PlayerCommand::Stop]));
+    }
 }

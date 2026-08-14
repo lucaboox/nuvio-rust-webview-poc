@@ -924,13 +924,6 @@ function HomeHero({
           : undefined
       }
     >
-      <button
-        className="home-hero-expand"
-        aria-label={`View details for ${active.name}`}
-        onClick={() => onSelect(active)}
-      >
-        <Icon name="fullscreen" size={25} />
-      </button>
       <div className="home-hero-copy">
         {active.logo && !logoFailed ? (
           <img

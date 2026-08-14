@@ -517,8 +517,6 @@ button { font: inherit; }
 .home-hero p { display: -webkit-box; max-width: 680px; overflow: hidden; margin: 19px 0 25px; color: #e3e5e7; font-size: 17px; line-height: 1.55; text-shadow: 0 2px 10px #000; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .home-hero-details { min-height: 52px; padding: 0 27px; border: 0; border-radius: 28px; color: #272b31; background: #f3f4f5; font-size: 15px; font-weight: 800; cursor: pointer; box-shadow: 0 8px 28px #0005; transition: transform .16s,background .16s; }
 .home-hero-details:hover { background: #fff; transform: translateY(-2px); }
-.home-hero-expand { position: absolute; z-index: 3; top: 26px; right: 31px; display: grid; place-items: center; width: 52px; height: 52px; padding: 0; border: 0; border-radius: 50%; color: #e8eaec; background: #2b2f35d1; backdrop-filter: blur(12px); cursor: pointer; }
-.home-hero-expand:hover { background: #383d45e8; }
 .home-hero-pages { position: absolute; z-index: 3; right: 34px; bottom: 43px; display: flex; align-items: center; gap: 9px; }
 .home-hero-pages button { width: 9px; height: 9px; padding: 0; border: 0; border-radius: 9px; background: #f2f3f4; opacity: .9; cursor: pointer; transition: width .2s,opacity .2s; }
 .home-hero-pages button.active { width: 39px; opacity: 1; }
@@ -863,6 +861,30 @@ button { font: inherit; }
 /* Settings: search, results and the new control types. */
 .settings-side { display: grid; gap: 12px; align-content: start; position: sticky; top: 12px; }
 .settings-side .settings-nav { position: static; }
+.update-settings-group { display: grid !important; grid-template-columns: 210px minmax(0, 1fr); gap: 30px; }
+.update-card { overflow: hidden; border: 1px solid #343a42; border-radius: 16px; background: #272b31; }
+.update-version { display: grid; gap: 5px; padding: 22px; border-bottom: 1px solid #343a42; }
+.update-version > span { color: #929ba5; font-size: 9px; font-weight: 800; letter-spacing: .16em; }
+.update-version > strong { color: #f1f3f5; font-size: 21px; }
+.update-version > small { color: #8e98a2; font-size: 11px; }
+.update-status { display: flex; align-items: flex-start; gap: 12px; margin: 18px 22px 0; padding: 14px; border-radius: 12px; color: #aeb6bf; background: #20242a; }
+.update-status svg { flex: 0 0 auto; margin-top: 1px; }
+.update-status > div { display: grid; gap: 3px; }
+.update-status strong { color: #e7eaed; font-size: 13px; }
+.update-status span { color: #929ba5; font-size: 11px; }
+.update-current { color: #9bc7a9; background: #203028; }
+.update-error { color: #d9a5a5; background: #342628; }
+.update-notes { margin: 14px 22px 0; color: #dce0e4; }
+.update-notes > strong { font-size: 12px; }
+.update-notes p { max-height: 116px; margin: 7px 0 0; overflow: auto; white-space: pre-wrap; color: #929ba5; font-size: 11px; line-height: 1.55; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 18px 22px 22px; }
+.update-actions button { border: 1px solid #3b424b; font: inherit; font-size: 12px; }
+.update-actions button:disabled { opacity: .55; cursor: wait; }
+.update-progress { position: relative; height: 26px; margin: 16px 22px 0; overflow: hidden; border-radius: 999px; background: #1d2126; }
+.update-progress i { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: #d9dde1; transition: width .18s ease; }
+.update-progress span { position: absolute; inset: 0; display: grid; place-items: center; color: #111418; font-size: 10px; font-weight: 800; mix-blend-mode: difference; }
+.amoled .update-card { background: #090909; }
+@media (max-width: 900px) { .update-settings-group { grid-template-columns: 1fr; } }
 .settings-search { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border: 1px solid #333a43; border-radius: 10px; background: #262a30; cursor: text; }
 .settings-search:focus-within { border-color: #4d5761; }
 .settings-search > svg { flex-shrink: 0; color: #79828c; }

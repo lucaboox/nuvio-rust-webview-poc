@@ -384,10 +384,7 @@ mod tests {
 
     #[test]
     fn progress_keys_match_nuvios_format() {
-        assert_eq!(
-            build_progress_key("tt100", Some(1), Some(2)),
-            "tt100_s1e2"
-        );
+        assert_eq!(build_progress_key("tt100", Some(1), Some(2)), "tt100_s1e2");
         assert_eq!(build_progress_key("tt100", None, None), "tt100");
         // A half-identified episode falls back to the bare content id, exactly
         // as buildWatchProgressKey does.

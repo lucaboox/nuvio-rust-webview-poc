@@ -1,4 +1,10 @@
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    io::Read,
+    net::{IpAddr, ToSocketAddrs},
+    sync::OnceLock,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -15,6 +21,19 @@ use crate::home_layout::{CatalogDefinition, HomeLayoutPlan, HomeLayoutRow, media
 const HOME_CATALOG_LIMIT: usize = 24;
 const HOME_HERO_ITEM_LIMIT: usize = 8;
 const COLLECTION_CATALOG_LIMIT: usize = 60;
+const MAX_ADDON_JSON_BYTES: usize = 8 * 1024 * 1024;
+const ADDON_WORKERS: usize = 8;
+
+fn content_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(ADDON_WORKERS)
+            .thread_name(|index| format!("nuvio-addon-{index}"))
+            .build()
+            .expect("valid addon worker pool")
+    })
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
@@ -343,6 +362,10 @@ impl Default for ContentService {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(20))
+                // Redirects are intentionally resolved by the addon author in
+                // its manifest URL. Following them here could turn a public
+                // addon into a request to a private/local service.
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent("NuvioRustPoc/0.2.0")
                 .build()
                 .expect("valid content HTTP client"),
@@ -576,11 +599,13 @@ impl ContentService {
         tasks.truncate(HOME_CATALOG_LIMIT);
 
         let client = &self.client;
-        let mut results: Vec<_> = tasks
-            .par_iter()
-            .enumerate()
-            .map(|(index, task)| (index, fetch_catalog(client, task, None, 20)))
-            .collect();
+        let mut results: Vec<_> = content_pool().install(|| {
+            tasks
+                .par_iter()
+                .enumerate()
+                .map(|(index, task)| (index, fetch_catalog(client, task, None, 20)))
+                .collect()
+        });
         results.sort_by_key(|(index, _)| *index);
 
         let mut sections = Vec::new();
@@ -677,14 +702,16 @@ impl ContentService {
         let mut tasks = self.catalog_tasks(true);
         tasks.truncate(HOME_CATALOG_LIMIT);
         let client = &self.client;
-        let mut results: Vec<_> = tasks
-            .par_iter()
-            .enumerate()
-            .map(|(index, task)| {
-                let extra = format!("search={}", encode_component(query));
-                (index, fetch_catalog(client, task, Some(&extra), 20))
-            })
-            .collect();
+        let mut results: Vec<_> = content_pool().install(|| {
+            tasks
+                .par_iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let extra = format!("search={}", encode_component(query));
+                    (index, fetch_catalog(client, task, Some(&extra), 20))
+                })
+                .collect()
+        });
         results.sort_by_key(|(index, _)| *index);
         let mut sections = Vec::new();
         for (_, result) in results {
@@ -826,17 +853,19 @@ impl ContentService {
         }
 
         let client = &self.client;
-        let mut results: Vec<_> = tasks
-            .par_iter()
-            .enumerate()
-            .map(|(index, task)| {
-                let extra = catalog_extras(task.genre.as_deref(), 0);
-                (
-                    index,
-                    fetch_catalog(client, task, extra.as_deref(), COLLECTION_CATALOG_LIMIT),
-                )
-            })
-            .collect();
+        let mut results: Vec<_> = content_pool().install(|| {
+            tasks
+                .par_iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let extra = catalog_extras(task.genre.as_deref(), 0);
+                    (
+                        index,
+                        fetch_catalog(client, task, extra.as_deref(), COLLECTION_CATALOG_LIMIT),
+                    )
+                })
+                .collect()
+        });
         // The folder's own source order is meaningful, so restore it.
         results.sort_by_key(|(index, _)| *index);
 
@@ -939,35 +968,37 @@ impl ContentService {
             .cloned()
             .collect();
         let client = &self.client;
-        let results: Vec<_> = compatible
-            .par_iter()
-            .map(|installed| {
-                let url = resource_url(&installed.url, "stream", content_type, id, None)?;
-                let payload: Value = get_json(client, &url)?;
-                let values = payload
-                    .get("streams")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut streams = Vec::new();
-                for value in values {
-                    if let Ok(mut stream) = serde_json::from_value::<StreamSource>(value) {
-                        if stream.description.trim().is_empty() {
-                            stream.description = stream.title.clone();
+        let results: Vec<_> = content_pool().install(|| {
+            compatible
+                .par_iter()
+                .map(|installed| {
+                    let url = resource_url(&installed.url, "stream", content_type, id, None)?;
+                    let payload: Value = get_json(client, &url)?;
+                    let values = payload
+                        .get("streams")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut streams = Vec::new();
+                    for value in values {
+                        if let Ok(mut stream) = serde_json::from_value::<StreamSource>(value) {
+                            if stream.description.trim().is_empty() {
+                                stream.description = stream.title.clone();
+                            }
+                            stream.addon_name = installed.display_name.clone();
+                            stream.addon_id = installed.manifest.id.clone();
+                            stream.addon_logo = installed
+                                .manifest
+                                .logo
+                                .as_deref()
+                                .and_then(|logo| resolve_asset_url(&installed.url, logo));
+                            streams.push(stream);
                         }
-                        stream.addon_name = installed.display_name.clone();
-                        stream.addon_id = installed.manifest.id.clone();
-                        stream.addon_logo = installed
-                            .manifest
-                            .logo
-                            .as_deref()
-                            .and_then(|logo| resolve_asset_url(&installed.url, logo));
-                        streams.push(stream);
                     }
-                }
-                Ok::<_, anyhow::Error>(streams)
-            })
-            .collect();
+                    Ok::<_, anyhow::Error>(streams)
+                })
+                .collect()
+        });
         let mut streams = Vec::new();
         let mut errors = Vec::new();
         for result in results {
@@ -998,10 +1029,12 @@ impl ContentService {
             return Vec::new();
         }
         let client = &self.client;
-        let results: Vec<_> = enabled
-            .par_iter()
-            .map(|addon| fetch_manifest(client, addon))
-            .collect();
+        let results: Vec<_> = content_pool().install(|| {
+            enabled
+                .par_iter()
+                .map(|addon| fetch_manifest(client, addon))
+                .collect()
+        });
         self.manifests.clear();
         let mut errors = Vec::new();
         for result in results {
@@ -1461,7 +1494,8 @@ fn compatible(types: &[String], prefixes: &[String], content_type: &str, id: &st
 }
 
 fn get_json<T: for<'de> Deserialize<'de>>(client: &Client, url: &str) -> Result<T> {
-    let response = client
+    validate_addon_url(&Url::parse(url).context("invalid addon resource URL")?)?;
+    let mut response = client
         .get(url)
         .send()
         .with_context(|| format!("Request failed: {url}"))?;
@@ -1469,9 +1503,22 @@ fn get_json<T: for<'de> Deserialize<'de>>(client: &Client, url: &str) -> Result<
     if !status.is_success() {
         bail!("Addon returned HTTP {status}: {url}");
     }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_ADDON_JSON_BYTES as u64)
+    {
+        bail!("Addon response exceeded the 8 MiB safety limit: {url}");
+    }
+    let mut payload = Vec::new();
     response
-        .json()
-        .with_context(|| format!("Addon returned invalid JSON: {url}"))
+        .by_ref()
+        .take((MAX_ADDON_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut payload)
+        .with_context(|| format!("Could not read addon response: {url}"))?;
+    if payload.len() > MAX_ADDON_JSON_BYTES {
+        bail!("Addon response exceeded the 8 MiB safety limit: {url}");
+    }
+    serde_json::from_slice(&payload).with_context(|| format!("Addon returned invalid JSON: {url}"))
 }
 
 fn normalize_manifest_url(input: &str) -> Result<String> {
@@ -1479,11 +1526,76 @@ fn normalize_manifest_url(input: &str) -> Result<String> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("addon URL must use http or https");
     }
+    validate_addon_url(&url)?;
     if !url.path().trim_end_matches('/').ends_with("manifest.json") {
         let path = format!("{}/manifest.json", url.path().trim_end_matches('/'));
         url.set_path(&path);
     }
     Ok(url.to_string())
+}
+
+pub(crate) fn validate_addon_url(url: &Url) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("addon URL must use http or https");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("addon URLs cannot contain embedded credentials");
+    }
+    let host = url.host_str().context("addon URL is missing a host")?;
+    if allow_private_addons() {
+        return Ok(());
+    }
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        bail!("local/private addon URLs require NUVIO_ALLOW_PRIVATE_ADDONS=1");
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        if is_private_address(address) {
+            bail!("local/private addon URLs require NUVIO_ALLOW_PRIVATE_ADDONS=1");
+        }
+        return Ok(());
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("could not resolve addon host {host}"))?;
+    if addresses
+        .into_iter()
+        .any(|address| is_private_address(address.ip()))
+    {
+        bail!("addon host resolved to a local/private address");
+    }
+    Ok(())
+}
+
+fn allow_private_addons() -> bool {
+    std::env::var("NUVIO_ALLOW_PRIVATE_ADDONS")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
+fn is_private_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_multicast()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| is_private_address(IpAddr::V4(address)))
+        }
+    }
 }
 
 fn configure_url(manifest_url: &str) -> String {
@@ -1585,6 +1697,21 @@ mod tests {
     #[test]
     fn encodes_utf8_components() {
         assert_eq!(encode_component("Amélie: 1"), "Am%C3%A9lie%3A%201");
+    }
+
+    #[test]
+    fn rejects_private_and_credentialed_addon_urls() {
+        assert!(normalize_manifest_url("http://127.0.0.1:7000").is_err());
+        assert!(normalize_manifest_url("http://[::1]:7000").is_err());
+        assert!(normalize_manifest_url("https://user:pass@8.8.8.8/addon").is_err());
+    }
+
+    #[test]
+    fn accepts_and_normalizes_public_addon_urls() {
+        assert_eq!(
+            normalize_manifest_url("https://8.8.8.8/addon").unwrap(),
+            "https://8.8.8.8/addon/manifest.json"
+        );
     }
 
     #[test]

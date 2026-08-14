@@ -11,7 +11,7 @@
 use std::{
     ffi::{CString, c_char, c_void},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     time::{Duration, Instant},
 };
@@ -42,6 +42,20 @@ type MpvCommand = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> i32
 type MpvWaitEvent = unsafe extern "C" fn(*mut c_void, f64) -> *const MpvEvent;
 type MpvDestroy = unsafe extern "C" fn(*mut c_void);
 
+struct MpvHandle {
+    raw: *mut c_void,
+    destroy: MpvDestroy,
+}
+
+impl Drop for MpvHandle {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe { (self.destroy)(self.raw) };
+            self.raw = ptr::null_mut();
+        }
+    }
+}
+
 #[repr(C)]
 struct MpvEvent {
     event_id: i32,
@@ -61,7 +75,9 @@ pub fn capture(
     request_headers: &[String],
     position_ms: i64,
 ) -> Result<Vec<u8>> {
-    let _guard = CAPTURE_LOCK.lock().map_err(|_| anyhow::anyhow!("thumbnailer was interrupted"))?;
+    let _guard = CAPTURE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("thumbnailer was interrupted"))?;
     let out_dir = std::env::temp_dir().join(format!(
         "nuvio-thumb-{}-{}",
         std::process::id(),
@@ -82,7 +98,7 @@ fn capture_into(
     url: &str,
     request_headers: &[String],
     position_ms: i64,
-    out_dir: &PathBuf,
+    out_dir: &Path,
 ) -> Result<()> {
     unsafe {
         let library = library(dll_path)?;
@@ -94,10 +110,15 @@ fn capture_into(
         let mpv_wait_event = *library.get::<MpvWaitEvent>(b"mpv_wait_event\0")?;
         let mpv_destroy = *library.get::<MpvDestroy>(b"mpv_terminate_destroy\0")?;
 
-        let handle = mpv_create();
-        if handle.is_null() {
+        let raw_handle = mpv_create();
+        if raw_handle.is_null() {
             bail!("mpv_create failed for the thumbnailer");
         }
+        let handle_guard = MpvHandle {
+            raw: raw_handle,
+            destroy: mpv_destroy,
+        };
+        let handle = handle_guard.raw;
 
         let try_set = |name: &str, value: &str| -> Result<bool> {
             let name_c = CString::new(name)?;
@@ -114,7 +135,9 @@ fn capture_into(
         // spelling a given libmpv accepts depends on its vintage, so take
         // whichever one it recognises.
         let set_vo_image = |suffix: &str, value: &str| -> Result<()> {
-            if try_set(&format!("vo-image-{suffix}"), value)? || try_set(&format!("image-{suffix}"), value)? {
+            if try_set(&format!("vo-image-{suffix}"), value)?
+                || try_set(&format!("image-{suffix}"), value)?
+            {
                 return Ok(());
             }
             bail!("libmpv accepted neither vo-image-{suffix} nor image-{suffix}")
@@ -157,13 +180,15 @@ fn capture_into(
         }
         // A dead link must fail fast rather than hold the scrub preview open.
         set("network-timeout", "5")?;
-        set("start", &format!("{:.3}", position_ms.max(0) as f64 / 1000.0))?;
+        set(
+            "start",
+            &format!("{:.3}", position_ms.max(0) as f64 / 1000.0),
+        )?;
         if !request_headers.is_empty() {
             set("http-header-fields", &request_headers.join(","))?;
         }
 
         if mpv_initialize(handle) < 0 {
-            mpv_destroy(handle);
             bail!("thumbnailer initialisation failed");
         }
 
@@ -171,7 +196,6 @@ fn capture_into(
         let source = CString::new(url)?;
         let args = [load.as_ptr(), source.as_ptr(), ptr::null()];
         if mpv_command(handle, args.as_ptr()) < 0 {
-            mpv_destroy(handle);
             bail!("the thumbnailer could not open this source");
         }
 
@@ -179,7 +203,6 @@ fn capture_into(
         let deadline = Instant::now() + CAPTURE_TIMEOUT;
         loop {
             if Instant::now() >= deadline {
-                mpv_destroy(handle);
                 bail!("timed out decoding the thumbnail");
             }
             let event = mpv_wait_event(handle, 0.25);
@@ -191,7 +214,7 @@ fn capture_into(
                 _ => {}
             }
         }
-        mpv_destroy(handle);
+        drop(handle_guard);
     }
     Ok(())
 }

@@ -27,48 +27,50 @@ type SharedState = Arc<Mutex<AppState>>;
 /// request produced. Splitting `ipc::handle`'s dispatch into forty typed Tauri
 /// commands would touch every call site without changing behaviour.
 ///
-/// Tauri runs synchronous commands on its own thread pool, so the blocking
-/// Supabase and addon HTTP work inside `ipc::handle` does not stall the UI —
-/// this replaces the manual `std::thread::spawn` plus `EventLoopProxy` hop the
-/// wry version needed.
-#[tauri::command]
+/// The explicit async command mode forces this synchronous handler onto
+/// Tauri's worker pool. The blocking operations below therefore cannot stall
+/// the UI thread.
+#[tauri::command(async)]
 fn bridge(raw: String, window: Window, state: State<'_, SharedState>) -> Vec<Value> {
-    if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw) {
-        if request.method == "window.setFullscreen" {
-            let enabled = request
-                .params
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let outcome = window
-                .set_fullscreen(enabled)
-                .map(|()| serde_json::json!({ "fullscreen": enabled }));
-            return vec![to_value(ipc::OutboundMessage::Response(match outcome {
-                Ok(result) => ipc::ResponseEnvelope {
-                    id: request.id,
-                    ok: true,
-                    result: Some(result),
-                    error: None,
-                },
-                Err(error) => ipc::ResponseEnvelope {
-                    id: request.id,
-                    ok: false,
-                    result: None,
-                    error: Some(ipc::ErrorBody {
-                        code: "window_command_failed",
-                        message: error.to_string(),
-                    }),
-                },
-            }))];
-        }
+    if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)
+        && request.method == "window.setFullscreen"
+    {
+        let enabled = request
+            .params
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let outcome = window
+            .set_fullscreen(enabled)
+            .map(|()| serde_json::json!({ "fullscreen": enabled }));
+        return vec![to_value(ipc::OutboundMessage::Response(match outcome {
+            Ok(result) => ipc::ResponseEnvelope {
+                id: request.id,
+                ok: true,
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => ipc::ResponseEnvelope {
+                id: request.id,
+                ok: false,
+                result: None,
+                error: Some(ipc::ErrorBody {
+                    code: "window_command_failed",
+                    message: error.to_string(),
+                }),
+            },
+        }))];
     }
 
     let shared = state.inner();
-    let messages = match ipc::handle_content_shared(&raw, shared) {
+    let messages = match ipc::handle_player_shared(&raw, shared) {
         Some(messages) => messages,
-        None => match shared.lock() {
-            Ok(mut state) => ipc::handle(&raw, &mut state),
-            Err(_) => return Vec::new(),
+        None => match ipc::handle_content_shared(&raw, shared) {
+            Some(messages) => messages,
+            None => match shared.lock() {
+                Ok(mut state) => ipc::handle(&raw, &mut state),
+                Err(_) => return Vec::new(),
+            },
         },
     };
     messages.into_iter().map(to_value).collect()
@@ -84,6 +86,8 @@ fn to_value(message: ipc::OutboundMessage) -> Value {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(SharedState::default())
         .invoke_handler(tauri::generate_handler![bridge])
         .setup(|app| {
@@ -95,10 +99,19 @@ fn main() {
                 let window = app
                     .get_webview_window("main")
                     .ok_or("the main window is missing")?;
+                // The bundle ICO is still used by Explorer/the executable,
+                // while the live window gets the full-resolution PNG. Letting
+                // Windows choose a small ICO frame here made the title/taskbar
+                // icon visibly pixelated at scaled desktop DPIs.
+                window.set_icon(tauri::image::Image::from_bytes(include_bytes!(
+                    "../assets/Nuvio-icon.png"
+                ))?)?;
                 let hwnd = window.hwnd()?.0 as isize;
                 let state: State<'_, SharedState> = app.state();
-                if let Ok(mut state) = state.lock() {
-                    state.player.configure_window(hwnd);
+                if let Ok(state) = state.lock()
+                    && let Ok(mut player) = state.player.lock()
+                {
+                    player.configure_window(hwnd);
                 }
             }
             Ok(())
@@ -108,8 +121,10 @@ fn main() {
                 // libmpv holds a child window and a decode thread; dropping the
                 // process without stopping it can wedge on exit.
                 let state: State<'_, SharedState> = window.state();
-                if let Ok(mut state) = state.lock() {
-                    state.player.stop();
+                if let Ok(state) = state.lock()
+                    && let Ok(mut player) = state.player.lock()
+                {
+                    player.stop();
                 }
             }
         })

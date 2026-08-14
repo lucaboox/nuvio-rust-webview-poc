@@ -644,6 +644,7 @@ fn select_localized_logo<'a>(items: &'a [Value], language: &str) -> Option<&'a V
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::select_localized_logo;
     use serde_json::json;
