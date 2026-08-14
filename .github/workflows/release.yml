@@ -54,6 +54,7 @@ jobs:
             throw "Configure NUVIO_SUPABASE_URL and NUVIO_SUPABASE_ANON_KEY repository variables before publishing"
           }
           npm run check:ui
+          npm run build:ui
           cargo test --manifest-path shell/Cargo.toml --locked
 
       - name: Build signed installer and publish release
