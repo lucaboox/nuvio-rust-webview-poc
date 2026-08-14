@@ -15,7 +15,7 @@ The updater is cross-platform. Windows is the only release job enabled today; la
 
 ## One-time GitHub setup
 
-The update keypair lives in `.tauri/` and is ignored by Git. Back up `.tauri/nuvio-updater.key` somewhere secure. If it is lost, existing installs cannot trust future releases.
+The update keypair and local password backup live in `.tauri/` and are ignored by Git. Back up `.tauri/nuvio-updater.key` and `.tauri/nuvio-updater-password.txt` somewhere secure. If either is lost, existing installs cannot trust future releases.
 
 Create these repository settings:
 
@@ -25,7 +25,7 @@ Create these repository settings:
    Get-Content -Raw .tauri\nuvio-updater.key | gh secret set TAURI_SIGNING_PRIVATE_KEY
    ```
 
-2. The generated key currently has no password. The workflow accepts an optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret if the key is replaced with a password-protected one later.
+2. Add the password from `.tauri/nuvio-updater-password.txt` as the GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 3. Add the public client configuration as GitHub Actions repository variables: `NUVIO_SUPABASE_URL`, `NUVIO_SUPABASE_FALLBACK_URL`, and `NUVIO_SUPABASE_ANON_KEY`.
 
 Tauri updater signatures protect downloaded updates. They are separate from Microsoft Authenticode signing; until a Windows code-signing certificate is configured, SmartScreen can still show an unknown-publisher warning for a first-time install.
@@ -36,6 +36,7 @@ From a clean release branch:
 
 ```powershell
 npm run version:set -- 0.1.0-alpha.2
+npm run prepare:runtime
 npm run check:ui
 cargo test --manifest-path shell/Cargo.toml
 git add package.json package-lock.json shell/Cargo.toml shell/Cargo.lock shell/tauri.conf.json
@@ -45,6 +46,8 @@ git push origin HEAD --tags
 ```
 
 The `Release Nuvio` workflow validates that the tag matches `tauri.conf.json`, builds the x64 NSIS installer, signs its updater artifact, creates the GitHub release, and uploads `latest.json`. The app checks that file from **Settings > Updates**.
+
+The workflow downloads the pinned libmpv Windows runtime from the repository's `runtime-libmpv-v0.40.0-465-gf6c116491` dependency release and verifies its recorded SHA-256 before compiling. That dependency release remains a GitHub prerelease so it cannot replace the application updater's latest release.
 
 Alpha tags are deliberately published as normal GitHub releases for now. GitHub's `/releases/latest/` endpoint excludes releases marked as prereleases, so marking the release as a GitHub prerelease would make this update channel invisible.
 

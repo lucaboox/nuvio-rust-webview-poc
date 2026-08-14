@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "beforeBuildCommand": {
       "cwd": "..",
-      "script": "npm run build:ui"
+      "script": "npm run prepare:runtime && npm run build:ui"
     }
   },
   "app": {
@@ -40,7 +40,7 @@
       "assets/nuvio.ico"
     ],
     "resources": {
-      "../../../composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll": "libmpv-2.dll"
+      "runtime/libmpv-2.dll": "libmpv-2.dll"
     },
     "windows": {
       "nsis": {
@@ -52,7 +52,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0MTQwRkZCRUQ0QzA5RkQKUldUOUNVenQrdzhVZEJBekZTTlRDOG5MZWpacXBMMlRmeVhlVmozSXZ5WVFVTG1KdUZRbUErOUgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBMTk3NTNFQjg5RTcxMEIKUldRTGNaNjRQblVaV3QrVEVGcUZ5cDdpMTFENGlNZHRqbUgvVExGVFZzWW5nckFCZ1ZEZXlqeloK",
       "endpoints": [
         "https://github.com/lucaboox/nuvio-rust-webview-poc/releases/latest/download/latest.json"
       ],

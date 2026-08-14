@@ -34,6 +34,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Cache pinned libmpv runtime
+        uses: actions/cache@v4
+        with:
+          path: shell/runtime/libmpv-2.dll
+          key: libmpv-windows-x64-07c68bb211f23a218ded0a36eb12207dc3aeb44e5318ffca6ce9dcc7c3173906
+
+      - name: Prepare verified libmpv runtime
+        run: npm run prepare:runtime
+
       - name: Validate version and source
         shell: pwsh
         run: |

@@ -4,15 +4,16 @@
   "version": "0.1.0-alpha.1",
   "type": "module",
   "scripts": {
+    "prepare:runtime": "node scripts/prepare-libmpv.mjs",
     "build:ui": "vite build",
     "check:ui": "tsc -b",
     "dev:ui": "vite",
-    "build": "npm run build:ui && cargo build --manifest-path shell/Cargo.toml",
-    "dev": "npm run build:ui && cargo run --manifest-path shell/Cargo.toml",
+    "build": "npm run prepare:runtime && npm run build:ui && cargo build --manifest-path shell/Cargo.toml",
+    "dev": "npm run prepare:runtime && npm run build:ui && cargo run --manifest-path shell/Cargo.toml",
     "tauri": "tauri",
     "bundle": "tauri build --config shell/tauri.conf.json",
     "version:set": "node scripts/set-version.mjs",
-    "test:shell": "cargo test --manifest-path shell/Cargo.toml"
+    "test:shell": "npm run prepare:runtime && cargo test --manifest-path shell/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

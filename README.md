@@ -38,13 +38,14 @@ From this directory:
 
 ```powershell
 npm.cmd install
+npm.cmd run prepare:runtime
 npm.cmd run check:ui
 npm.cmd run build:ui
 cargo test --manifest-path shell/Cargo.toml
 npm.cmd run tauri -- dev --config shell/tauri.conf.json
 ```
 
-The UI must be built before a direct Cargo build because the shell embeds `ui/dist` at compile time. The Tauri development command handles this through `beforeBuildCommand`.
+The UI must be built before a direct Cargo build because the shell embeds `ui/dist` at compile time. Direct Cargo commands also need the pinned Windows libmpv runtime prepared first. Tauri commands handle both through `beforeBuildCommand`; the runtime download is SHA-256 verified and then reused locally.
 
 The local `.env.local` contains the same public Supabase client URL and anon key embedded in official Nuvio builds. It is ignored by Git. Use `.env.example` when configuring another checkout.
 
