@@ -1,7 +1,7 @@
 {
   "name": "nuvio-rust-webview-poc",
   "private": true,
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "type": "module",
   "scripts": {
     "prepare:runtime": "node scripts/prepare-libmpv.mjs",

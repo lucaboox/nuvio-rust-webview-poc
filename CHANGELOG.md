@@ -4,7 +4,7 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
-## [0.1.0-alpha.3] - 2026-08-14
+## [0.1.0-alpha.4] - 2026-08-14
 
 - Added optional self-hosted Nuvio backend configuration at sign-in.
 - Added download storage cleanup for empty show folders and orphaned artwork.
