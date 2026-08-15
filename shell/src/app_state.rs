@@ -36,6 +36,11 @@ pub struct AppState {
     /// Cached so `content.home` can order rows without a Supabase round trip on
     /// every render. Refreshed whenever the profile, addons or layout change.
     pub home_layout: HomeLayoutPlan,
+    /// Set when the addons or profile changed. Loading the organizer means
+    /// fetching every installed addon's manifest, which is far too much to do
+    /// before the window can draw, so it waits for something to actually want
+    /// it — which is the home page, where those manifests are fetched anyway.
+    pub home_layout_stale: bool,
     /// Milliseconds each startup step took, in order. Bootstrap runs several
     /// backend calls one after another and the window shows nothing until they
     /// finish, so when that is slow the only useful question is which one.
@@ -60,6 +65,7 @@ impl Default for AppState {
             settings_blob: None,
             settings_loaded_at: None,
             home_layout: HomeLayoutPlan::default(),
+            home_layout_stale: true,
             boot_timings: Vec::new(),
             session_restore_attempted: false,
         }
@@ -126,8 +132,9 @@ impl AppState {
         self.addons = self.auth.addons(effective_profile_id)?;
         self.content.lock().unwrap().invalidate();
         // The organizer is per-profile and keyed by the installed catalogs, so
-        // it has to be reloaded on every path that swaps either one.
-        self.refresh_home_layout();
+        // it has to be reloaded on every path that swaps either one — but on
+        // the next read, not here, where it would sit in front of the window.
+        self.home_layout_stale = true;
         Ok(())
     }
 
@@ -152,6 +159,16 @@ impl AppState {
             self.home_catalog_definitions(),
             &self.synced_collections(),
         )
+    }
+
+    /// Loads the organizer if something invalidated it. Called from the paths
+    /// that read the plan rather than the paths that change it.
+    pub fn ensure_home_layout(&mut self) {
+        if !self.home_layout_stale {
+            return;
+        }
+        self.home_layout_stale = false;
+        self.refresh_home_layout();
     }
 
     /// Best-effort: a layout that will not load must not block the home page,
@@ -225,8 +242,8 @@ impl AppState {
             .collect();
         self.content.lock().unwrap().invalidate();
         // Installing or disabling an addon changes which catalogs the organizer
-        // knows about, so its definitions have to be rebuilt.
-        self.refresh_home_layout();
+        // knows about, so its definitions have to be rebuilt on the next read.
+        self.home_layout_stale = true;
         Ok(())
     }
 

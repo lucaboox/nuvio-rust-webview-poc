@@ -326,7 +326,10 @@ pub fn handle_content_shared(
         return None;
     }
     let (content, addons, metadata_config, home_layout) = {
-        let state = shared_state.lock().ok()?;
+        let mut state = shared_state.lock().ok()?;
+        // The organizer is loaded here rather than at startup: it needs every
+        // addon manifest, and the home page is about to fetch those anyway.
+        state.ensure_home_layout();
         (
             Arc::clone(&state.content),
             state.addons.clone(),
