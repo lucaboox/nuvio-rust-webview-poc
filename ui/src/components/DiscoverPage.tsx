@@ -1,3 +1,4 @@
+import { typeLabel } from "../data/catalogLabels";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type {
@@ -290,19 +291,3 @@ export function DiscoverPage({
   );
 }
 
-function typeLabel(type: string) {
-  switch (type.toLowerCase()) {
-    case "movie":
-      return "Movies";
-    case "series":
-      return "Series";
-    case "anime":
-      return "Anime";
-    case "channel":
-      return "Channels";
-    case "tv":
-      return "TV";
-    default:
-      return type.charAt(0).toUpperCase() + type.slice(1);
-  }
-}

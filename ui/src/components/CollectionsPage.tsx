@@ -1,3 +1,4 @@
+import { catalogLabel } from "../data/catalogLabels";
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type {
@@ -533,7 +534,12 @@ export function CollectionFolderPage({
           {sections.map((section) => (
             <MediaRow
               key={section.key}
-              section={section}
+              // Rows inside a collection sit next to sibling catalogs from the
+              // same addon, so the heading has to say which type it holds.
+              section={{
+                ...section,
+                title: catalogLabel(section.title, section.contentType),
+              }}
               progress={progress}
               onSelect={onSelect}
               onSeeAll={onSeeAll}
@@ -565,7 +571,7 @@ export function CollectionFolderPage({
                 key={section.key}
                 onClick={() => setActiveTab(section.key)}
               >
-                {section.title}
+                {catalogLabel(section.title, section.contentType)}
                 <small>{section.subtitle}</small>
               </button>
             ))}
