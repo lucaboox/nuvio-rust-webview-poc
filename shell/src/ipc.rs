@@ -561,6 +561,13 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 "addons": state.addons,
                 "settings": state.settings_snapshot,
                 "uptimeMs": state.started_at.elapsed().as_millis(),
+                // Where the wait went, so a slow launch can be attributed to a
+                // step rather than guessed at.
+                "bootTimings": state
+                    .boot_timings
+                    .iter()
+                    .map(|(label, ms)| json!({ "step": label, "ms": ms }))
+                    .collect::<Vec<_>>(),
             }),
         ),
         "ui.ping" => {

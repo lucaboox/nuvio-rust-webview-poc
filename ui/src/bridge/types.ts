@@ -29,6 +29,8 @@ export type BootstrapResult = {
   activeProfileIndex: number;
   addons: AddonRow[];
   settings?: SettingsSnapshot | null;
+  /** How long each startup step took, so a slow launch can be attributed. */
+  bootTimings?: { step: string; ms: number }[];
   player: {
     backend: string;
     directMpvReady: boolean;

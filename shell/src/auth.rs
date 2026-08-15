@@ -1,4 +1,12 @@
-use std::{env, fs, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, Response};
@@ -275,6 +283,9 @@ pub struct AuthService {
     config: Option<BackendConfig>,
     session: Option<Session>,
     sync_client_id: String,
+    /// Index of the endpoint that answered most recently. Shared across clones
+    /// so every one of them benefits from what any of them learned.
+    preferred_base: Arc<AtomicUsize>,
 }
 
 impl Default for AuthService {
@@ -282,12 +293,18 @@ impl Default for AuthService {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
+                // A backend that is refusing connections or blackholing them
+                // should not cost the whole request budget before the fallback
+                // is tried. Startup makes several of these calls in sequence,
+                // so 30s of dead primary is 30s of a blank window.
+                .connect_timeout(Duration::from_secs(5))
                 .user_agent("NuvioRustPoc/0.1.0")
                 .build()
                 .expect("valid HTTP client"),
             config: BackendConfig::load(),
             session: None,
             sync_client_id: format!("nuvio-rust-{}", Uuid::new_v4().simple()),
+            preferred_base: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -367,6 +384,8 @@ impl AuthService {
         if changed {
             self.session = None;
             clear_refresh_token();
+            // The remembered endpoint belonged to the old configuration.
+            self.preferred_base.store(0, Ordering::Relaxed);
         }
         self.config = Some(next);
         Ok(self.snapshot())
@@ -695,14 +714,28 @@ impl AuthService {
         decode_success(response)
     }
 
+    /// Sends to the endpoint that answered last, falling back to the others.
+    ///
+    /// Startup makes five of these calls in sequence. Beginning each one at the
+    /// primary means a primary that is down is paid for five times over, which
+    /// is minutes of a window that shows nothing. Remembering which endpoint
+    /// answered costs one failure instead, and the order resets whenever the
+    /// backend is reconfigured.
     fn send_with_fallback<F>(&self, config: &BackendConfig, request: F) -> Result<Response>
     where
         F: Fn(&str) -> Result<Response, reqwest::Error>,
     {
+        let bases: Vec<&str> = config.base_urls().collect();
+        if bases.is_empty() {
+            return Err(anyhow::anyhow!("No backend endpoint is configured"));
+        }
+        let start = self.preferred_base.load(Ordering::Relaxed) % bases.len();
         let mut last_error = None;
-        for base_url in config.base_urls() {
-            match request(base_url) {
+        for offset in 0..bases.len() {
+            let index = (start + offset) % bases.len();
+            match request(bases[index]) {
                 Ok(response) if !is_origin_failure(response.status().as_u16()) => {
+                    self.preferred_base.store(index, Ordering::Relaxed);
                     return Ok(response);
                 }
                 Ok(response) => {

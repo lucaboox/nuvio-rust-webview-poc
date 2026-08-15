@@ -138,7 +138,21 @@ export function App() {
         setActiveProfileIndex(result.activeProfileIndex);
         setAddons(result.addons);
         setAppSettings(result.settings ?? null);
-        setBridgeStatus(`Rust ↔ JS · protocol v${result.protocolVersion}`);
+        // Startup runs several backend calls in sequence behind a window that
+        // shows nothing, so when it drags, the slowest step is named rather
+        // than left to be guessed at.
+        const timings = result.bootTimings ?? [];
+        const total = timings.reduce((sum, entry) => sum + entry.ms, 0);
+        const slowest = timings.reduce<{ step: string; ms: number } | null>(
+          (worst, entry) => (worst && worst.ms >= entry.ms ? worst : entry),
+          null,
+        );
+        if (timings.length) console.info("startup timings", timings);
+        setBridgeStatus(
+          total >= 3000 && slowest
+            ? `Rust ↔ JS · protocol v${result.protocolVersion} · slow start ${(total / 1000).toFixed(1)}s, most of it ${slowest.step} (${(slowest.ms / 1000).toFixed(1)}s)`
+            : `Rust ↔ JS · protocol v${result.protocolVersion}`,
+        );
       })
       .catch((error: Error) => setBridgeStatus(error.message));
     const stopForeground = onNativeEvent("sync.foreground", () => {

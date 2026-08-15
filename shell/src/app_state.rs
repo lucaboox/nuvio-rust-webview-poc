@@ -36,6 +36,10 @@ pub struct AppState {
     /// Cached so `content.home` can order rows without a Supabase round trip on
     /// every render. Refreshed whenever the profile, addons or layout change.
     pub home_layout: HomeLayoutPlan,
+    /// Milliseconds each startup step took, in order. Bootstrap runs several
+    /// backend calls one after another and the window shows nothing until they
+    /// finish, so when that is slow the only useful question is which one.
+    pub boot_timings: Vec<(&'static str, u128)>,
     pub session_restore_attempted: bool,
 }
 
@@ -56,18 +60,31 @@ impl Default for AppState {
             settings_blob: None,
             settings_loaded_at: None,
             home_layout: HomeLayoutPlan::default(),
+            boot_timings: Vec::new(),
             session_restore_attempted: false,
         }
     }
 }
 
 impl AppState {
+    /// Times a startup step and records it under `boot_timings`.
+    fn timed<T>(&mut self, label: &'static str, step: impl FnOnce(&mut Self) -> T) -> T {
+        let started = Instant::now();
+        let outcome = step(self);
+        let elapsed = started.elapsed().as_millis();
+        self.boot_timings.push((label, elapsed));
+        if elapsed >= 1000 {
+            eprintln!("startup: {label} took {elapsed}ms");
+        }
+        outcome
+    }
+
     pub fn restore_saved_account(&mut self) -> anyhow::Result<()> {
         if self.session_restore_attempted {
             return Ok(());
         }
         self.session_restore_attempted = true;
-        let restored = self.auth.restore_session();
+        let restored = self.timed("restoreSession", |state| state.auth.restore_session());
         let restored = match restored {
             Ok(restored) => restored,
             Err(error) => {
@@ -85,7 +102,7 @@ impl AppState {
     }
 
     pub fn refresh_account_data(&mut self) -> anyhow::Result<()> {
-        self.profiles = self.auth.profiles()?;
+        self.profiles = self.timed("profiles", |state| state.auth.profiles())?;
         if !self
             .profiles
             .iter()
@@ -97,8 +114,8 @@ impl AppState {
                 .map(|profile| profile.profile_index)
                 .unwrap_or(1);
         }
-        self.refresh_addons()?;
-        if let Err(error) = self.refresh_settings() {
+        self.timed("addons", |state| state.refresh_addons())?;
+        if let Err(error) = self.timed("settings", |state| state.refresh_settings()) {
             eprintln!("profile settings could not be loaded: {error:#}");
         }
         Ok(())
@@ -140,10 +157,16 @@ impl AppState {
     /// Best-effort: a layout that will not load must not block the home page,
     /// so the default plan (everything visible, manifest order) stands in.
     pub fn refresh_home_layout(&mut self) {
+        let started = Instant::now();
         self.home_layout = self
             .load_home_layout()
             .map(|layout| layout.plan())
             .unwrap_or_default();
+        let elapsed = started.elapsed().as_millis();
+        self.boot_timings.push(("homeLayout", elapsed));
+        if elapsed >= 1000 {
+            eprintln!("startup: homeLayout took {elapsed}ms");
+        }
     }
 
     pub fn refresh_settings(&mut self) -> anyhow::Result<()> {
