@@ -46,31 +46,109 @@ export type SettingSection = {
   custom?: "homeLayout" | "collections" | "downloads" | "updates";
 };
 
+// Nuvio's AvailableLanguageOptions, verbatim — same codes, same English
+// labels. The previous list was eight invented entries, so most of what the
+// other clients offer simply could not be chosen here.
 const LANGUAGES = [
+  ["Afrikaans", "af"],
+  ["Albanian", "sq"],
+  ["Amharic", "am"],
+  ["Arabic", "ar"],
+  ["Armenian", "hy"],
+  ["Azerbaijani", "az"],
+  ["Basque", "eu"],
+  ["Belarusian", "be"],
+  ["Bengali", "bn"],
+  ["Bosnian", "bs"],
+  ["Bulgarian", "bg"],
+  ["Burmese", "my"],
+  ["Catalan", "ca"],
+  ["Chinese", "zh"],
+  ["Chinese (Simplified)", "zh-CN"],
+  ["Chinese (Traditional)", "zh-TW"],
+  ["Croatian", "hr"],
+  ["Czech", "cs"],
+  ["Danish", "da"],
+  ["Dutch", "nl"],
   ["English", "en"],
-  ["Spanish", "es"],
+  ["Estonian", "et"],
+  ["Filipino", "tl"],
+  ["Finnish", "fi"],
   ["French", "fr"],
+  ["Galician", "gl"],
+  ["Georgian", "ka"],
   ["German", "de"],
+  ["Greek", "el"],
+  ["Gujarati", "gu"],
+  ["Hebrew", "he"],
+  ["Hindi", "hi"],
+  ["Hungarian", "hu"],
+  ["Icelandic", "is"],
+  ["Indonesian", "id"],
+  ["Irish", "ga"],
   ["Italian", "it"],
-  ["Portuguese", "pt"],
   ["Japanese", "ja"],
+  ["Kannada", "kn"],
+  ["Kazakh", "kk"],
+  ["Khmer", "km"],
   ["Korean", "ko"],
+  ["Lao", "lo"],
+  ["Latvian", "lv"],
+  ["Lithuanian", "lt"],
+  ["Macedonian", "mk"],
+  ["Malay", "ms"],
+  ["Malayalam", "ml"],
+  ["Maltese", "mt"],
+  ["Marathi", "mr"],
+  ["Mongolian", "mn"],
+  ["Nepali", "ne"],
+  ["Norwegian", "no"],
+  ["Punjabi", "pa"],
+  ["Persian", "fa"],
+  ["Polish", "pl"],
+  ["Portuguese (Portugal)", "pt"],
+  ["Portuguese (Brazil)", "pt-BR"],
+  ["Romanian", "ro"],
+  ["Russian", "ru"],
+  ["Serbian", "sr"],
+  ["Sinhala", "si"],
+  ["Slovak", "sk"],
+  ["Slovenian", "sl"],
+  ["Spanish", "es"],
+  ["Spanish (Latin America)", "es-419"],
+  ["Swahili", "sw"],
+  ["Swedish", "sv"],
+  ["Tamil", "ta"],
+  ["Telugu", "te"],
+  ["Thai", "th"],
+  ["Turkish", "tr"],
+  ["Ukrainian", "uk"],
+  ["Urdu", "ur"],
+  ["Uzbek", "uz"],
+  ["Vietnamese", "vi"],
+  ["Welsh", "cy"],
+  ["Zulu", "zu"],
 ] as const;
 
+// The special values and their wording also come from Nuvio
+// (PlayerLanguagePreferences: AudioLanguageOption / SubtitleLanguageOption).
+// "Off" was ours; theirs is "None", and the stored code is "none".
 const AUDIO_LANGUAGES = [
-  ["Match device", "device"],
-  ["Stream default", "default"],
-  ["Original", "original"],
+  ["Default (media file)", "default"],
+  ["Device language", "device"],
+  ["Original language", "original"],
   ...LANGUAGES,
 ] as const;
 
 const SUBTITLE_LANGUAGES = [
-  ["Off", "none"],
-  ["Match device", "device"],
-  ["Forced only", "forced"],
+  ["None", "none"],
+  ["Device language", "device"],
+  ["Forced", "forced"],
   ...LANGUAGES,
 ] as const;
 
+// A secondary preference is genuinely unset rather than "none", so the empty
+// string stays as its own entry.
 const OPTIONAL_LANGUAGES = [["None", ""], ...LANGUAGES] as const;
 
 export const SECTIONS: SettingSection[] = [
