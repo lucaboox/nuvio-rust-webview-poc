@@ -29,6 +29,8 @@ const SCOPE_NOTE: Record<SettingScope, string> = {
     "Not synced anywhere. These exist only in this client and are stored on this machine.",
 };
 
+const PUSH_DEBOUNCE_MS = 500;
+
 export function SettingsPage({
   profileIndex,
   settings,
@@ -71,7 +73,16 @@ export function SettingsPage({
   onSettingsChange?(settings: SettingsSnapshot): void;
   onHomeLayoutChanged?(): void;
 }) {
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // Values changed locally but not yet confirmed by the server.
+  const [pending, setPending] = useState<Record<string, unknown>>({});
+  const pushTimers = useRef<Record<string, number>>({});
+  useEffect(
+    () => () => {
+      for (const timer of Object.values(pushTimers.current))
+        window.clearTimeout(timer);
+    },
+    [],
+  );
   const [error, setError] = useState<string | null>(null);
   const [sectionId, setSectionId] = useState<string>(SECTIONS[0].id);
   const [query, setQuery] = useState("");
@@ -96,17 +107,40 @@ export function SettingsPage({
 
   const hits = useMemo(() => searchSettings(query), [query]);
 
-  async function updateSynced(key: string, value: unknown) {
-    setBusyKey(key);
+  /**
+   * Applies the change locally, then pushes after a pause.
+   *
+   * Nuvio's own client keeps settings in local state and debounces the push by
+   * 500ms; this mirrors that. Awaiting the round trip before showing the new
+   * value is what made toggles feel unresponsive, and disabling the control
+   * meanwhile made a slider unusable — every drag step queued another blocking
+   * request.
+   */
+  function updateSynced(key: string, value: unknown) {
     setError(null);
-    try {
-      const next = await invoke<SettingsSnapshot>("settings.update", { key, value });
-      onSettingsChange?.(next);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Setting update failed");
-    } finally {
-      setBusyKey(null);
-    }
+    setPending((current) => ({ ...current, [key]: value }));
+    const timers = pushTimers.current;
+    if (timers[key]) window.clearTimeout(timers[key]);
+    timers[key] = window.setTimeout(() => {
+      delete timers[key];
+      invoke<SettingsSnapshot>("settings.update", { key, value })
+        .then((next) => {
+          onSettingsChange?.(next);
+          // Drop the optimistic value only once the server agrees, so the
+          // control never flickers back to the old one in between.
+          setPending((current) => {
+            const { [key]: _applied, ...rest } = current;
+            return rest;
+          });
+        })
+        .catch((reason: Error) => {
+          setError(reason.message || "Setting update failed");
+          setPending((current) => {
+            const { [key]: _failed, ...rest } = current;
+            return rest;
+          });
+        });
+    }, PUSH_DEBOUNCE_MS);
   }
 
   if (!settings)
@@ -124,6 +158,9 @@ export function SettingsPage({
   const section = SECTIONS.find((item) => item.id === sectionId) ?? SECTIONS[0];
 
   const readValue = (setting: SettingDef, scope: SettingScope): unknown =>
+    scope !== "local" && setting.id in pending
+      ? pending[String(setting.id)]
+      :
     scope === "local"
       ? client[setting.id as keyof ClientSettings]
       : settings[setting.id as keyof SettingsSnapshot];
@@ -278,7 +315,7 @@ export function SettingsPage({
                         key={String(setting.id)}
                         setting={setting}
                         value={readValue(setting, section.scope)}
-                        busy={!!busyKey}
+                        busy={false}
                         highlighted={highlight === String(setting.id)}
                         onChange={(value) => commit(setting, section.scope, value)}
                       />
