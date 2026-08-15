@@ -756,6 +756,7 @@ export function App() {
               payload={home}
               collections={collections}
               progress={progress}
+              dismissedNextUp={appSettings?.dismissedNextUp ?? []}
               progressLibrary={[...progressLibrary, ...progressMetadata]}
               busy={contentBusy}
               error={contentError}
@@ -818,6 +819,7 @@ function ContentPage({
   payload,
   collections,
   progress,
+  dismissedNextUp,
   progressLibrary,
   busy,
   error,
@@ -830,6 +832,7 @@ function ContentPage({
   payload: HomePayload | null;
   collections: NuvioCollection[];
   progress: ProgressSnapshot;
+  dismissedNextUp: string[];
   progressLibrary: ContentMeta[];
   busy: boolean;
   error: string | null;
@@ -867,7 +870,13 @@ function ContentPage({
   const continuing = buildContinueWatching(progress, [
     ...catalogItems,
     ...progressLibrary,
-  ]);
+  ]).filter((card) => {
+    // Nuvio hides a next-up suggestion by the seed episode that produced it,
+    // so the key is built from the finished episode rather than the next one.
+    if (!card.nextUp) return true;
+    const key = `${card.item.id}|${card.seedSeason ?? -1}|${card.seedEpisode ?? -1}`;
+    return !dismissedNextUp.includes(key);
+  });
 
   // Rows come back in the order the home organizer defines, with collections
   // interleaved between catalogs exactly as Nuvio renders them. If the layout

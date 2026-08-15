@@ -7,23 +7,32 @@ import { isInLibrary, setLibraryMembership } from "../data/libraryCache";
 const openEvent = "nuvio-title-context-menu";
 const libraryChangedEvent = "nuvio-library-changed";
 
+/** Identifies a Continue Watching card so it can be dismissed. */
+export type DismissTarget = {
+  contentId: string;
+  season?: number;
+  episode?: number;
+};
+
 type MenuRequest = {
   item: ContentMeta;
   x: number;
   y: number;
   savedHint?: boolean;
+  dismiss?: DismissTarget;
 };
 
 export function showTitleContextMenu(
   event: React.MouseEvent,
   item: ContentMeta,
   savedHint?: boolean,
+  dismiss?: DismissTarget,
 ) {
   event.preventDefault();
   event.stopPropagation();
   window.dispatchEvent(
     new CustomEvent<MenuRequest>(openEvent, {
-      detail: { item, x: event.clientX, y: event.clientY, savedHint },
+      detail: { item, x: event.clientX, y: event.clientY, savedHint, dismiss },
     }),
   );
 }
@@ -121,6 +130,28 @@ export function TitleContextMenu({
           <Icon name="copy" size={18} />
           <span>Copy title</span>
         </button>
+        {menu.dismiss && (
+          <button
+            role="menuitem"
+            className="menu-destructive"
+            disabled={busy}
+            onClick={() => {
+              const target = menu.dismiss!;
+              setMenu(null);
+              // Records Nuvio's nextUpDismissKey in the synced continue
+              // watching preferences, so the card stays hidden everywhere.
+              void invoke("continueWatching.dismiss", {
+                contentId: target.contentId,
+                season: target.season ?? null,
+                episode: target.episode ?? null,
+                dismissed: true,
+              }).then(() => window.dispatchEvent(new Event(libraryChangedEvent)));
+            }}
+          >
+            <Icon name="close" size={18} />
+            <span>Dismiss from Continue Watching</span>
+          </button>
+        )}
       </div>
     </>
   );

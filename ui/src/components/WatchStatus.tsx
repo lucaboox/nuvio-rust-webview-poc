@@ -3,7 +3,17 @@ import { Icon } from "./Icon";
 import { getWatchedOverride, useWatchedOverrides, watchedKey } from "../data/watchedOverrides";
 
 export type WatchState = { watched: boolean; percent?: number };
-export type ContinueWatchingCard = { item: ContentMeta; video?: Video; progress?: ResumePoint; nextUp: boolean; lastWatched: number };
+export type ContinueWatchingCard = {
+  item: ContentMeta;
+  video?: Video;
+  progress?: ResumePoint;
+  nextUp: boolean;
+  lastWatched: number;
+  /** The finished episode that produced a next-up card. Nuvio keys its
+   *  dismissals on this seed, not on the episode being suggested. */
+  seedSeason?: number;
+  seedEpisode?: number;
+};
 
 export function watchStateForContent(item: Pick<ContentMeta, "id" | "contentType">, snapshot: ProgressSnapshot): WatchState | null {
   const latest = entriesFor(snapshot, item.id)[0];
@@ -123,9 +133,19 @@ export function buildContinueWatching(snapshot: ProgressSnapshot, metadata: Cont
     const completed = completedEpisodeSeed(snapshot, item, entries);
     if (!completed) continue;
     const next = nextReleasedVideo(item.videos, completed.season, completed.episode);
-    if (next) cards.push({ item, video: next, nextUp: true, lastWatched: completed.lastWatched });
+    if (next)
+      cards.push({
+        item,
+        video: next,
+        nextUp: true,
+        lastWatched: completed.lastWatched,
+        seedSeason: completed.season,
+        seedEpisode: completed.episode,
+      });
   }
-  return cards.sort((left, right) => right.lastWatched - left.lastWatched).slice(0, 20);
+  return cards
+    .sort((left, right) => right.lastWatched - left.lastWatched)
+    .slice(0, 40);
 }
 
 export function WatchStatus({ state }: { state: WatchState | null }) {

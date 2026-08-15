@@ -9,6 +9,8 @@ use crate::metadata::{MdbListMetadataSettings, MetadataConfig, TmdbMetadataSetti
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub amoled_enabled: bool,
+    /// Next-up cards hidden from Continue Watching, by nextUpDismissKey.
+    pub dismissed_next_up: Vec<String>,
     pub show_loading_overlay: bool,
     pub show_parental_guide: bool,
     pub resize_mode: String,
@@ -73,8 +75,93 @@ pub struct SettingsSnapshot {
 /// Nuvio stores poster card style as a JSON *string* inside the settings blob
 /// rather than as typed preference entries, so it needs its own read/write path.
 const POSTER_PAYLOAD_KEY: &str = "poster_card_style_settings_payload";
+const CONTINUE_WATCHING_PAYLOAD_KEY: &str = "continue_watching_settings_payload";
 const DEFAULT_POSTER_WIDTH: i64 = 126;
 const DEFAULT_POSTER_CORNER_RADIUS: i64 = 12;
+
+/// Nuvio's `nextUpDismissKey`: `contentId|season|episode`, with -1 standing in
+/// for a missing season or episode.
+pub fn next_up_dismiss_key(content_id: &str, season: Option<i64>, episode: Option<i64>) -> String {
+    format!(
+        "{}|{}|{}",
+        content_id.trim(),
+        season.unwrap_or(-1),
+        episode.unwrap_or(-1)
+    )
+}
+
+/// The continue-watching preferences ride as a JSON *string* inside the blob,
+/// the same way the poster style does — so it has to be parsed out, edited,
+/// and re-encoded rather than merged as an object.
+fn continue_watching_payload(blob: &Value) -> Map<String, Value> {
+    blob.pointer(&format!("/features/{CONTINUE_WATCHING_PAYLOAD_KEY}"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+pub fn dismissed_next_up(blob: &Value) -> Vec<String> {
+    continue_watching_payload(blob)
+        .get("dismissedNextUpKeys")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Adds or removes a dismissed next-up key and pushes the blob.
+pub fn set_next_up_dismissed(
+    auth: &AuthService,
+    profile_id: i32,
+    current_blob: &Value,
+    key: &str,
+    dismissed: bool,
+) -> Result<(SettingsSnapshot, Value)> {
+    let mut blob = current_blob.clone();
+    let mut payload = continue_watching_payload(&blob);
+    let mut keys: Vec<String> = payload
+        .get("dismissedNextUpKeys")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    keys.retain(|existing| existing != key);
+    if dismissed {
+        keys.push(key.to_string());
+    }
+    payload.insert("dismissedNextUpKeys".to_string(), json!(keys));
+
+    let encoded = serde_json::to_string(&Value::Object(payload))
+        .context("continue watching preferences could not be encoded")?;
+    let root = blob
+        .as_object_mut()
+        .context("settings blob is not an object")?;
+    let features = object_entry(root, "features")?;
+    features.insert(CONTINUE_WATCHING_PAYLOAD_KEY.to_string(), json!(encoded));
+
+    auth.rpc_unit(
+        "sync_push_profile_settings_blob",
+        &json!({
+            "p_profile_id": profile_id,
+            "p_platform": "desktop",
+            "p_settings_json": blob,
+            "p_origin_client_id": auth.sync_client_id(),
+        }),
+    )?;
+    Ok((snapshot(&blob), blob))
+}
 
 fn poster_style(blob: &Value) -> Value {
     blob.pointer(&format!("/features/{POSTER_PAYLOAD_KEY}"))
@@ -357,6 +444,7 @@ pub fn update_cached(
 pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
     SettingsSnapshot {
         amoled_enabled: typed_bool(blob, "theme_settings", "amoled_enabled").unwrap_or(false),
+        dismissed_next_up: dismissed_next_up(blob),
         show_loading_overlay: typed_bool(blob, "player_settings", "show_loading_overlay")
             .unwrap_or(true),
         show_parental_guide: typed_bool(blob, "player_settings", "show_parental_guide")

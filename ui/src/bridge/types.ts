@@ -408,6 +408,8 @@ export type AddonDescriptor = {
 
 export type SettingsSnapshot = {
   amoledEnabled: boolean;
+  /** Next-up cards hidden from Continue Watching, by nextUpDismissKey. */
+  dismissedNextUp: string[];
   showLoadingOverlay: boolean;
   showParentalGuide: boolean;
   resizeMode: "Fit" | "Fill" | "Zoom" | "Stretch";

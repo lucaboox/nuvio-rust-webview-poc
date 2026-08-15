@@ -926,6 +926,42 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 ),
             }
         }
+        "continueWatching.dismiss" => {
+            let content_id = string_param(&request.params, "contentId").unwrap_or_default();
+            let season = request.params.get("season").and_then(Value::as_i64);
+            let episode = request.params.get("episode").and_then(Value::as_i64);
+            let dismissed = request
+                .params
+                .get("dismissed")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            if content_id.is_empty() {
+                failure(id, "invalid_params", "A title is required".to_string())
+            } else if state.settings_blob.is_none()
+                && let Err(error) = state.refresh_settings()
+            {
+                failure(id, "continue_watching_dismiss_failed", error.to_string())
+            } else {
+                let blob = state.settings_blob.clone().unwrap_or_else(|| json!({}));
+                let key = crate::settings::next_up_dismiss_key(&content_id, season, episode);
+                match crate::settings::set_next_up_dismissed(
+                    &state.auth,
+                    state.active_profile_index,
+                    &blob,
+                    &key,
+                    dismissed,
+                ) {
+                    Ok((settings, blob)) => {
+                        state.settings_snapshot = Some(settings.clone());
+                        state.settings_blob = Some(blob);
+                        success(id, json!(settings))
+                    }
+                    Err(error) => {
+                        failure(id, "continue_watching_dismiss_failed", error.to_string())
+                    }
+                }
+            }
+        }
         "homeLayout.list" => match state.load_home_layout() {
             Ok(layout) => {
                 state.home_layout = layout.plan();
