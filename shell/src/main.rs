@@ -14,6 +14,7 @@ mod progress;
 mod settings;
 mod skip_segments;
 mod thumbnail;
+mod watch_sync;
 mod updates;
 
 use std::sync::{Arc, Mutex};

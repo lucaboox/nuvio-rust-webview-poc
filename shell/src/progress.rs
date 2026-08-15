@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::auth::AuthService;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumePoint {
     pub content_id: String,
@@ -15,9 +15,12 @@ pub struct ResumePoint {
     pub position_ms: i64,
     pub duration_ms: i64,
     pub last_watched: i64,
+    /// The server's own key for this row. Opaque: reused, never rebuilt.
+    #[serde(default)]
+    pub progress_key: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchedItem {
     pub content_id: String,
@@ -337,15 +340,49 @@ fn now_ms() -> i64 {
 }
 
 fn parse(row: &Value) -> Option<ResumePoint> {
+    parse_row(row)
+}
+
+/// Shared with the delta reader: snapshot rows and log events carry the same
+/// field names, so one parser serves both.
+pub(crate) fn parse_row(row: &Value) -> Option<ResumePoint> {
     Some(ResumePoint {
         content_id: row.get("content_id")?.as_str()?.to_string(),
         content_type: row.get("content_type")?.as_str()?.to_string(),
-        video_id: row.get("video_id")?.as_str()?.to_string(),
+        video_id: row
+            .get("video_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         season: number(row, "season"),
         episode: number(row, "episode"),
         position_ms: number(row, "position").unwrap_or_default(),
         duration_ms: number(row, "duration").unwrap_or_default(),
         last_watched: number(row, "last_watched").unwrap_or_default(),
+        progress_key: row
+            .get("progress_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+pub(crate) fn parse_watched(row: &Value) -> Option<WatchedItem> {
+    Some(WatchedItem {
+        content_id: row.get("content_id")?.as_str()?.to_string(),
+        content_type: row
+            .get("content_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        title: row
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        season: number(row, "season"),
+        episode: number(row, "episode"),
+        watched_at: number(row, "watched_at").unwrap_or_default(),
     })
 }
 

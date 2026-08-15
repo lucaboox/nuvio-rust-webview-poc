@@ -1190,16 +1190,14 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             }
         }
         "progress.snapshot" => {
-            let entries = crate::progress::list(&state.auth, state.active_profile_index);
-            let watched_items = crate::progress::watched(&state.auth, state.active_profile_index);
-            match (entries, watched_items) {
-                (Ok(entries), Ok(watched_items)) => success(
+            // Snapshot once, then deltas — see watch_sync. Falls back to a full
+            // pull whenever the cached cursor cannot be trusted.
+            match crate::watch_sync::load(&state.auth, state.active_profile_index) {
+                Ok((entries, watched_items)) => success(
                     id,
                     json!({ "entries": entries, "watchedItems": watched_items }),
                 ),
-                (Err(error), _) | (_, Err(error)) => {
-                    failure(id, "progress_load_failed", error.to_string())
-                }
+                Err(error) => failure(id, "progress_load_failed", error.to_string()),
             }
         }
         "system.openExternal" => match string_param(&request.params, "url")

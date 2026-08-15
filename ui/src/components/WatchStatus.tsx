@@ -85,6 +85,27 @@ export function remainingMs(entry: ResumePoint) {
   return Math.max(0, entry.durationMs - entry.positionMs);
 }
 
+/**
+ * Titles that could actually produce a Continue Watching card, newest first.
+ *
+ * Only a part-watched row or a series with a later episode ever yields one, so
+ * a finished movie is not worth a metadata lookup. Spending the resolve budget
+ * on them is what made the row look capped for anyone with a long history.
+ */
+export function continueWatchingCandidates(snapshot: ProgressSnapshot): Array<{ id: string; type: string; at: number }> {
+  const best = new Map<string, { id: string; type: string; at: number }>();
+  const consider = (id: string, type: string, at: number, qualifies: boolean) => {
+    if (!id || !type || !qualifies) return;
+    const existing = best.get(id);
+    if (!existing || at > existing.at) best.set(id, { id, type, at });
+  };
+  for (const entry of snapshot.entries)
+    consider(entry.contentId, entry.contentType, entry.lastWatched, (progressPercent(entry) > 0 && !isCompleted(entry)) || isSeries(entry.contentType));
+  for (const item of snapshot.watchedItems)
+    consider(item.contentId, item.contentType, item.watchedAt, isSeries(item.contentType));
+  return [...best.values()].sort((left, right) => right.at - left.at);
+}
+
 export function buildContinueWatching(snapshot: ProgressSnapshot, metadata: ContentMeta[]): ContinueWatchingCard[] {
   const metaById = new Map(metadata.map((item) => [item.id, item]));
   const contentIds = new Set([...snapshot.entries.map((entry) => entry.contentId), ...snapshot.watchedItems.map((item) => item.contentId)]);

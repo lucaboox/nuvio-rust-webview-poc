@@ -30,7 +30,10 @@ import { MediaRow } from "../components/MediaRow";
 import { LibraryPage } from "../components/LibraryPage";
 import { SettingsPage } from "../components/SettingsPage";
 import { ProfileMenu } from "../components/ProfileMenu";
-import { buildContinueWatching } from "../components/WatchStatus";
+import {
+  buildContinueWatching,
+  continueWatchingCandidates,
+} from "../components/WatchStatus";
 import { ContinueWatchingRow } from "../components/ContinueWatchingRow";
 import {
   CollectionFolderPage,
@@ -178,27 +181,14 @@ export function App() {
         setProgress(snapshot);
         setProgressLibrary(library.items);
         primeLibrary(library.items as LibraryItem[]);
-        const recentIdentities = [
-          ...snapshot.entries.map((entry) => ({
-            id: entry.contentId,
-            type: entry.contentType,
-            at: entry.lastWatched,
-          })),
-          ...snapshot.watchedItems.map((item) => ({
-            id: item.contentId,
-            type: item.contentType,
-            at: item.watchedAt,
-          })),
-        ]
-          .filter((item) => item.id && item.type)
-          .sort((left, right) => right.at - left.at);
-        const identities = new Map<string, string>();
-        for (const item of recentIdentities)
-          if (!identities.has(item.id)) identities.set(item.id, item.type);
+        // Only titles that could actually yield a card, newest first — a
+        // finished movie never can, and with a long history those were
+        // consuming the whole resolve budget.
+        const identities = continueWatchingCandidates(snapshot);
         const resolved = await Promise.all(
-          [...identities]
-            .slice(0, 20)
-            .map(([id, type]) =>
+          identities
+            .slice(0, 80)
+            .map(({ id, type }) =>
               invoke<ContentMeta>("content.resolveMeta", { id, type }).catch(
                 () => null,
               ),
