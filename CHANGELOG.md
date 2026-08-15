@@ -4,6 +4,16 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-08-15
+
+- Added Dismiss to the Continue Watching menu, which clears a title the same way the mobile app does.
+- Added the show password toggle back to sign-in.
+- Improved settings, which now apply immediately, save in the background, and pick up changes made on another device when the window regains focus.
+- Matched Nuvio's audio and subtitle language lists exactly.
+- Sped up startup by syncing only what changed in watch history, and stopped Continue Watching running short of titles.
+- Fixed addons that answer with a redirect being dropped, which could leave a title with no sources at all.
+- Fixed the source picker showing two scrollbars.
+
 ## [0.1.0-alpha.4] - 2026-08-14
 
 - Added optional self-hosted Nuvio backend configuration at sign-in.
