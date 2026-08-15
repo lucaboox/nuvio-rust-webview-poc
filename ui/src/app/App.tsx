@@ -140,10 +140,23 @@ export function App() {
         setBridgeStatus(`Rust ↔ JS · protocol v${result.protocolVersion}`);
       })
       .catch((error: Error) => setBridgeStatus(error.message));
-    return onNativeEvent<{ state: string; detail: string }>(
+    const stopForeground = onNativeEvent("sync.foreground", () => {
+      // Re-read what another device may have changed while we were away.
+      invoke<SettingsSnapshot>("settings.load")
+        .then((next) => setAppSettings(next ?? null))
+        .catch(() => undefined);
+      invoke<ProgressSnapshot>("progress.snapshot")
+        .then(setProgress)
+        .catch(() => undefined);
+    });
+    const stopPlayer = onNativeEvent<{ state: string; detail: string }>(
       "player.stateChanged",
       (event) => setPlayerStatus(`${event.state} · ${event.detail}`),
     );
+    return () => {
+      stopForeground();
+      stopPlayer();
+    };
   }, []);
 
   useEffect(() => {

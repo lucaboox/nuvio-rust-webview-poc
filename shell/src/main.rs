@@ -148,6 +148,24 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Nuvio pulls whenever the app comes to the foreground
+            // (AppForegroundMonitor → requestForegroundPull), which is why a
+            // change made elsewhere shows up there within a second or two of
+            // switching to it. Regaining focus is the desktop equivalent.
+            if matches!(event, WindowEvent::Focused(true)) {
+                if let Ok(mut state) = window.state::<SharedState>().lock() {
+                    // Expire the cache; the next read re-pulls.
+                    state.settings_loaded_at = None;
+                }
+                // The bridge only delivers events alongside a command
+                // response, so nudge the UI directly to re-read. `eval` lives
+                // on the webview rather than the window this closure receives.
+                if let Some(webview) = window.app_handle().get_webview_window("main") {
+                    let _ = webview.eval(
+                        "window.__NUVIO_BRIDGE_DELIVER__ && window.__NUVIO_BRIDGE_DELIVER__({event:'sync.foreground',payload:{}});",
+                    );
+                }
+            }
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 // libmpv holds a child window and a decode thread; dropping the
                 // process without stopping it can wedge on exit.

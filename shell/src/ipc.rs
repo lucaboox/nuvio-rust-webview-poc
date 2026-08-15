@@ -871,9 +871,21 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             }
         }
         "settings.load" => {
-            if state.settings_snapshot.is_none()
+            // A cached snapshot cannot see a change made on another device, so
+            // it expires. Nuvio re-pulls on a 4-minute timer; opening the page
+            // is a better moment for a desktop client, and the cache still
+            // covers repeated visits.
+            const SETTINGS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+            let stale = state
+                .settings_loaded_at
+                .map(|at| at.elapsed() >= SETTINGS_MAX_AGE)
+                .unwrap_or(true);
+            if (state.settings_snapshot.is_none() || stale)
                 && let Err(error) = state.refresh_settings()
+                && state.settings_snapshot.is_none()
             {
+                // Only fail when there is nothing to show; a refresh that could
+                // not reach the network should still serve what we already had.
                 failure(id, "settings_load_failed", error.to_string())
             } else {
                 success(id, json!(state.settings_snapshot))

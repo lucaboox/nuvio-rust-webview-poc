@@ -30,6 +30,9 @@ pub struct AppState {
     /// repositories. They are refreshed on profile changes, not page mounts.
     pub settings_snapshot: Option<SettingsSnapshot>,
     pub settings_blob: Option<Value>,
+    /// When the blob was last pulled. Settings changed on another device only
+    /// arrive on a pull, so a cached snapshot has to expire.
+    pub settings_loaded_at: Option<Instant>,
     /// Cached so `content.home` can order rows without a Supabase round trip on
     /// every render. Refreshed whenever the profile, addons or layout change.
     pub home_layout: HomeLayoutPlan,
@@ -51,6 +54,7 @@ impl Default for AppState {
             metadata_config: MetadataConfig::default(),
             settings_snapshot: None,
             settings_blob: None,
+            settings_loaded_at: None,
             home_layout: HomeLayoutPlan::default(),
             session_restore_attempted: false,
         }
@@ -147,6 +151,7 @@ impl AppState {
         // being selected, especially if the network request fails.
         self.settings_snapshot = None;
         self.settings_blob = None;
+        self.settings_loaded_at = None;
         self.metadata_config = MetadataConfig::default();
         let (snapshot, blob) = crate::settings::load(&self.auth, self.active_profile_index)?;
         self.metadata_config = crate::settings::metadata_config_from_blob(
@@ -154,6 +159,7 @@ impl AppState {
             self.active_profile_index,
             &blob,
         );
+        self.settings_loaded_at = Some(Instant::now());
         self.settings_snapshot = Some(snapshot);
         self.settings_blob = Some(blob);
         Ok(())
