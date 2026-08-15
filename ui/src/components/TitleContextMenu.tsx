@@ -6,10 +6,21 @@ import { isInLibrary, setLibraryMembership } from "../data/libraryCache";
 
 const openEvent = "nuvio-title-context-menu";
 const libraryChangedEvent = "nuvio-library-changed";
+const dismissedEvent = "nuvio-continue-watching-dismissed";
 
-/** Identifies a Continue Watching card so it can be dismissed. */
+/**
+ * Identifies a Continue Watching card so it can be dismissed.
+ *
+ * The two kinds are removed differently. A next-up suggestion is suppressed by
+ * recording Nuvio's nextUpDismissKey; a part-watched row has no such list —
+ * `dismissedNextUpKeys` is only consulted for next-up candidates — so the only
+ * way to take it off the row is to clear its resume point.
+ */
 export type DismissTarget = {
+  kind: "nextUp" | "resume";
   contentId: string;
+  contentType: string;
+  videoId?: string;
   season?: number;
   episode?: number;
 };
@@ -138,23 +149,40 @@ export function TitleContextMenu({
             onClick={() => {
               const target = menu.dismiss!;
               setMenu(null);
-              // Records Nuvio's nextUpDismissKey in the synced continue
-              // watching preferences, so the card stays hidden everywhere.
-              void invoke("continueWatching.dismiss", {
-                contentId: target.contentId,
-                season: target.season ?? null,
-                episode: target.episode ?? null,
-                dismissed: true,
-              }).then(() => window.dispatchEvent(new Event(libraryChangedEvent)));
+              const request =
+                target.kind === "nextUp"
+                  ? invoke("continueWatching.dismiss", {
+                      contentId: target.contentId,
+                      season: target.season ?? null,
+                      episode: target.episode ?? null,
+                      dismissed: true,
+                    })
+                  : invoke("progress.clear", {
+                      identity: {
+                        contentId: target.contentId,
+                        contentType: target.contentType,
+                        videoId: target.videoId ?? target.contentId,
+                        season: target.season ?? null,
+                        episode: target.episode ?? null,
+                      },
+                    });
+              void request.then(() =>
+                window.dispatchEvent(new Event(dismissedEvent)),
+              );
             }}
           >
             <Icon name="close" size={18} />
-            <span>Dismiss from Continue Watching</span>
+            <span>Dismiss</span>
           </button>
         )}
       </div>
     </>
   );
+}
+
+export function onContinueWatchingDismissed(callback: () => void) {
+  window.addEventListener(dismissedEvent, callback);
+  return () => window.removeEventListener(dismissedEvent, callback);
 }
 
 export function onLibraryChanged(callback: () => void) {

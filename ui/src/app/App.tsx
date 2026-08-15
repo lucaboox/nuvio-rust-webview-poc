@@ -40,6 +40,7 @@ import {
   CollectionRows,
 } from "../components/CollectionsPage";
 import {
+  onContinueWatchingDismissed,
   onLibraryChanged,
   showTitleContextMenu,
   TitleContextMenu,
@@ -234,6 +235,21 @@ export function App() {
   useEffect(
     () =>
       onLibraryChanged(() => setLibraryRevision((revision) => revision + 1)),
+    [],
+  );
+
+  // A dismissal either records a next-up key in the settings blob or deletes a
+  // resume point, so both the snapshot and the settings have to be re-read.
+  useEffect(
+    () =>
+      onContinueWatchingDismissed(() => {
+        invoke<ProgressSnapshot>("progress.snapshot")
+          .then(setProgress)
+          .catch(() => undefined);
+        invoke<SettingsSnapshot>("settings.load")
+          .then((next) => setAppSettings(next ?? null))
+          .catch(() => undefined);
+      }),
     [],
   );
 
