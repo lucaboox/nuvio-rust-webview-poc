@@ -1,3 +1,4 @@
+import { Eye, EyeOff } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type { AccountPayload, AuthSnapshot } from "../bridge/types";
@@ -6,6 +7,7 @@ export function AuthGate({ auth, onAuthenticated }: { auth: AuthSnapshot; onAuth
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [selfHosted, setSelfHosted] = useState(auth.selfHosted);
   const [backendUrl, setBackendUrl] = useState(auth.backendUrl ?? "");
   const [publishableKey, setPublishableKey] = useState("");
@@ -85,7 +87,7 @@ export function AuthGate({ auth, onAuthenticated }: { auth: AuthSnapshot; onAuth
             <small>The URL and public client key stay on this device. HTTPS is strongly recommended for remote servers.</small>
           </fieldset>}
           <label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required /></label>
-          <label>Password<input type="password" autoComplete={isSignUp ? "new-password" : "current-password"} minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" required /></label>
+          <label>Password<div className="password-field"><input type={showPassword ? "text" : "password"} autoComplete={isSignUp ? "new-password" : "current-password"} minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" required /><button type="button" aria-label={showPassword ? "Hide password" : "Show password"} title={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} onClick={() => setShowPassword((value) => !value)}>{showPassword ? <EyeOff /> : <Eye />}</button></div></label>
           <button className="auth-submit" disabled={busy || !backendReady}>{busy ? "Connecting…" : isSignUp ? "Create account" : "Sign in"}</button>
         </form>
 
