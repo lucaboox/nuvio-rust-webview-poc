@@ -962,6 +962,22 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 }
             }
         }
+        "progress.clearForContent" => {
+            // Nuvio's onContinueWatchingRemove deletes progress for the whole
+            // title, not one episode — clearing a single row only promotes the
+            // next-most-recent one and the card stays put.
+            match string_param(&request.params, "contentId") {
+                Some(content_id) if !content_id.is_empty() => unit_result(
+                    id,
+                    crate::progress::clear_content(
+                        &state.auth,
+                        state.active_profile_index,
+                        content_id,
+                    ),
+                ),
+                _ => failure(id, "invalid_params", "A title is required".to_string()),
+            }
+        }
         "homeLayout.list" => match state.load_home_layout() {
             Ok(layout) => {
                 state.home_layout = layout.plan();
@@ -1453,6 +1469,22 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     let rtx_super_resolution = player_settings
                         .as_ref()
                         .is_some_and(|snapshot| snapshot.rtx_super_resolution);
+                    // Starting a title you had dismissed brings its suggestions
+                    // back, the way Nuvio clears the keys when progress is
+                    // recorded. Best effort: a failure here must not stop
+                    // playback.
+                    if let Some(blob) = state.settings_blob.clone()
+                        && let Ok(Some((settings, blob))) =
+                            crate::settings::clear_dismissed_for_content(
+                                &state.auth,
+                                profile_id,
+                                &blob,
+                                &identity.content_id,
+                            )
+                    {
+                        state.settings_snapshot = Some(settings);
+                        state.settings_blob = Some(blob);
+                    }
                     match state
                         .player
                         .lock()

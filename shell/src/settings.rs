@@ -116,6 +116,50 @@ pub fn dismissed_next_up(blob: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Clears every dismissal for a title.
+///
+/// Mirrors `WatchProgressRepository.removeDismissedNextUpKeysForContent`,
+/// which Nuvio calls whenever progress is recorded: resuming a show you had
+/// dismissed should bring its suggestions back, otherwise the suppression is
+/// permanent. Returns `None` when nothing was dismissed, so the caller can
+/// skip a pointless push.
+pub fn clear_dismissed_for_content(
+    auth: &AuthService,
+    profile_id: i32,
+    current_blob: &Value,
+    content_id: &str,
+) -> Result<Option<(SettingsSnapshot, Value)>> {
+    let prefix = format!("{}|", content_id.trim());
+    let existing = dismissed_next_up(current_blob);
+    if !existing.iter().any(|key| key.starts_with(&prefix)) {
+        return Ok(None);
+    }
+    let mut blob = current_blob.clone();
+    let mut payload = continue_watching_payload(&blob);
+    let kept: Vec<String> = existing
+        .into_iter()
+        .filter(|key| !key.starts_with(&prefix))
+        .collect();
+    payload.insert("dismissedNextUpKeys".to_string(), json!(kept));
+    let encoded = serde_json::to_string(&Value::Object(payload))
+        .context("continue watching preferences could not be encoded")?;
+    let root = blob
+        .as_object_mut()
+        .context("settings blob is not an object")?;
+    let features = object_entry(root, "features")?;
+    features.insert(CONTINUE_WATCHING_PAYLOAD_KEY.to_string(), json!(encoded));
+    auth.rpc_unit(
+        "sync_push_profile_settings_blob",
+        &json!({
+            "p_profile_id": profile_id,
+            "p_platform": "desktop",
+            "p_settings_json": blob,
+            "p_origin_client_id": auth.sync_client_id(),
+        }),
+    )?;
+    Ok(Some((snapshot(&blob), blob)))
+}
+
 /// Adds or removes a dismissed next-up key and pushes the blob.
 pub fn set_next_up_dismissed(
     auth: &AuthService,

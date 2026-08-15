@@ -19,8 +19,6 @@ const dismissedEvent = "nuvio-continue-watching-dismissed";
 export type DismissTarget = {
   kind: "nextUp" | "resume";
   contentId: string;
-  contentType: string;
-  videoId?: string;
   season?: number;
   episode?: number;
 };
@@ -157,14 +155,11 @@ export function TitleContextMenu({
                       episode: target.episode ?? null,
                       dismissed: true,
                     })
-                  : invoke("progress.clear", {
-                      identity: {
-                        contentId: target.contentId,
-                        contentType: target.contentType,
-                        videoId: target.videoId ?? target.contentId,
-                        season: target.season ?? null,
-                        episode: target.episode ?? null,
-                      },
+                  : // The whole title, not one episode: clearing a single
+                    // row only promotes the next-most-recent one and the card
+                    // stays on the row.
+                    invoke("progress.clearForContent", {
+                      contentId: target.contentId,
                     });
               void request.then(() =>
                 window.dispatchEvent(new Event(dismissedEvent)),

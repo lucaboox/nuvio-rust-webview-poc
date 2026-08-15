@@ -314,6 +314,32 @@ pub fn set_watched(
     clear_progress(auth, profile_id, identity)
 }
 
+/// Removes every resume point for a title.
+///
+/// Nuvio's `onContinueWatchingRemove` calls `removeProgress(contentId = ...)`
+/// for a part-watched card — the whole title, not one episode. Deleting a
+/// single episode only promotes the next-most-recent one, so the card shuffles
+/// instead of disappearing.
+pub fn clear_content(auth: &AuthService, profile_id: i32, content_id: &str) -> Result<()> {
+    let keys: Vec<String> = stored_rows(auth, profile_id)?
+        .into_iter()
+        .filter(|row| row.content_id == content_id)
+        .map(|row| row.progress_key)
+        .filter(|key| !key.trim().is_empty())
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    auth.rpc_unit(
+        "sync_delete_watch_progress",
+        &json!({
+            "p_profile_id": profile_id,
+            "p_keys": keys,
+            "p_origin_client_id": auth.sync_client_id(),
+        }),
+    )
+}
+
 /// Removes the resume point for one video, using the same opaque key the
 /// server stores.
 pub fn clear_progress(
