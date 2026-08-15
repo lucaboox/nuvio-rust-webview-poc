@@ -22,7 +22,10 @@ const HOME_CATALOG_LIMIT: usize = 24;
 const HOME_HERO_ITEM_LIMIT: usize = 8;
 const COLLECTION_CATALOG_LIMIT: usize = 60;
 const MAX_ADDON_JSON_BYTES: usize = 8 * 1024 * 1024;
-const ADDON_WORKERS: usize = 8;
+/// Manifest and stream fetches are IO-bound, so the pool exists to bound
+/// sockets rather than CPU. Eight meant a long tail of addons waited behind
+/// four waves of the slowest one in each.
+const ADDON_WORKERS: usize = 16;
 
 fn content_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
@@ -364,6 +367,11 @@ impl Default for ContentService {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(20))
+                // A host that is down should cost a handshake, not the whole
+                // request budget. One dead addon used to hold a worker for
+                // twenty seconds, and with every installed addon fetched at
+                // once that gates the entire batch.
+                .connect_timeout(Duration::from_secs(5))
                 // Redirects are intentionally resolved by the addon author in
                 // its manifest URL. Following them here could turn a public
                 // addon into a request to a private/local service.
@@ -1180,6 +1188,7 @@ fn catalog_extras(genre: Option<&str>, skip: usize) -> Option<String> {
 }
 
 fn fetch_manifest(client: &Client, addon: &AddonRow) -> Result<InstalledManifest> {
+    let started = std::time::Instant::now();
     let url = normalize_manifest_url(&addon.url)?;
     let manifest: Manifest = get_json(client, &url).with_context(|| {
         format!(
@@ -1187,6 +1196,13 @@ fn fetch_manifest(client: &Client, addon: &AddonRow) -> Result<InstalledManifest
             addon.name.as_deref().unwrap_or(&addon.url)
         )
     })?;
+    // Every installed addon is fetched before the home page can be ordered, so
+    // the batch is only as fast as its slowest member. Naming that one is the
+    // difference between "addons are slow" and knowing which to remove.
+    let elapsed = started.elapsed().as_millis();
+    if elapsed >= 2000 {
+        eprintln!("addon manifest: {} took {elapsed}ms", addon.url);
+    }
     let display_name = addon
         .name
         .clone()
