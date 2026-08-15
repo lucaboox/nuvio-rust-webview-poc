@@ -153,12 +153,32 @@ impl AppState {
     /// Pulls the organizer from Supabase. Read-only — never pushes, so opening
     /// the app cannot rewrite what another device saved.
     pub fn load_home_layout(&self) -> anyhow::Result<HomeLayout> {
-        crate::home_layout::load(
+        // Split so a slow layout load names its own cause. The three parts fail
+        // for completely different reasons: addon manifests are HTTP against
+        // third parties, the other two are Supabase.
+        let started = std::time::Instant::now();
+        let definitions = self.home_catalog_definitions();
+        let manifests_ms = started.elapsed().as_millis();
+
+        let started = std::time::Instant::now();
+        let collections = self.synced_collections();
+        let collections_ms = started.elapsed().as_millis();
+
+        let started = std::time::Instant::now();
+        let layout = crate::home_layout::load(
             &self.auth,
             self.active_profile_index,
-            self.home_catalog_definitions(),
-            &self.synced_collections(),
-        )
+            definitions,
+            &collections,
+        );
+        let layout_ms = started.elapsed().as_millis();
+
+        if manifests_ms + collections_ms + layout_ms >= 1000 {
+            eprintln!(
+                "home layout: manifests {manifests_ms}ms, collections {collections_ms}ms, organizer {layout_ms}ms"
+            );
+        }
+        layout
     }
 
     /// Loads the organizer if something invalidated it. Called from the paths

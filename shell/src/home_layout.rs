@@ -17,6 +17,7 @@
 //!   * `heroEnabled` / `heroSourceEnabled` are deliberately absent from the wire
 //!     schema. Nuvio keeps them per-device, so we keep them in a local file.
 
+use rayon::prelude::*;
 use std::{
     collections::HashSet,
     env, fs,
@@ -907,13 +908,27 @@ fn fetch_best_remote_payload(
     profile_id: i32,
     local: &LocalState,
 ) -> Result<Option<SyncHomeCatalogPayload>> {
-    let shared = fetch_remote_row(auth, profile_id, SHARED_SYNC_PLATFORM, local)?;
-    let mut legacy = Vec::new();
-    for platform in LEGACY_SYNC_PLATFORMS {
-        if let Some(row) = fetch_remote_row(auth, profile_id, platform, local)? {
-            legacy.push(row);
-        }
+    // One request per platform, run together rather than one after another.
+    // They are independent reads and the merge below wants all of them, so
+    // waiting for each in turn cost the sum of three round trips — which was
+    // the whole of the home page's delay.
+    let platforms: Vec<&str> = std::iter::once(SHARED_SYNC_PLATFORM)
+        .chain(LEGACY_SYNC_PLATFORMS.iter().copied())
+        .collect();
+    let started = std::time::Instant::now();
+    let mut fetched: Vec<Option<RemoteRow>> = platforms
+        .par_iter()
+        .map(|platform| fetch_remote_row(auth, profile_id, platform, local))
+        .collect::<Result<Vec<_>>>()?;
+    let elapsed = started.elapsed().as_millis();
+    if elapsed >= 1000 {
+        eprintln!(
+            "home layout: {} platform rows took {elapsed}ms",
+            platforms.len()
+        );
     }
+    let shared = fetched.remove(0);
+    let legacy: Vec<RemoteRow> = fetched.into_iter().flatten().collect();
 
     let rows: Vec<&RemoteRow> = shared.iter().chain(legacy.iter()).collect();
     let Some(selected) = newest(
