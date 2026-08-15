@@ -55,7 +55,17 @@ jobs:
           }
           npm run check:ui
           npm run build:ui
+          npm run release:notes
           cargo test --manifest-path shell/Cargo.toml --locked
+
+      - name: Read release notes from changelog
+        id: release_notes
+        shell: pwsh
+        run: |
+          $delimiter = "NUVIO_RELEASE_NOTES_$([guid]::NewGuid().ToString('N'))"
+          "body<<$delimiter" >> $env:GITHUB_OUTPUT
+          npm run --silent release:notes >> $env:GITHUB_OUTPUT
+          $delimiter >> $env:GITHUB_OUTPUT
 
       - name: Build signed installer and publish release
         uses: tauri-apps/tauri-action@v1
@@ -69,7 +79,7 @@ jobs:
           args: --config shell/tauri.conf.json --bundles nsis
           tagName: v__VERSION__
           releaseName: Nuvio __VERSION__
-          releaseBody: Install Nuvio with the Windows setup executable below. Existing installations can update from Settings > Updates.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true

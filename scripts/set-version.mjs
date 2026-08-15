@@ -28,4 +28,11 @@ const cargo = readFileSync(cargoPath, "utf8").replace(
 );
 writeFileSync(cargoPath, cargo);
 
+const cargoLockPath = resolve(root, "shell", "Cargo.lock");
+const cargoLock = readFileSync(cargoLockPath, "utf8").replace(
+  /(name = "nuvio-rust-webview-poc"\r?\nversion = ")[^"]+("\r?\n)/,
+  `$1${version}$2`,
+);
+writeFileSync(cargoLockPath, cargoLock);
+
 console.log(`Nuvio version set to ${version}`);

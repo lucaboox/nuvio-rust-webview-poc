@@ -1,19 +1,38 @@
 import { useState, type FormEvent } from "react";
 import { invoke } from "../bridge/nativeBridge";
-import type { AccountPayload } from "../bridge/types";
+import type { AccountPayload, AuthSnapshot } from "../bridge/types";
 
-export function AuthGate({ backendConfigured, onAuthenticated }: { backendConfigured: boolean; onAuthenticated(payload: AccountPayload): void }) {
+export function AuthGate({ auth, onAuthenticated }: { auth: AuthSnapshot; onAuthenticated(payload: AccountPayload): void }) {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [selfHosted, setSelfHosted] = useState(auth.selfHosted);
+  const [backendUrl, setBackendUrl] = useState(auth.backendUrl ?? "");
+  const [publishableKey, setPublishableKey] = useState("");
+  const [backendState, setBackendState] = useState(auth);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const comparableUrl = (value: string) => value.trim().replace(/\/+$/, "");
+  const savedKeyMatches = selfHosted
+    && backendState.selfHosted
+    && backendState.customKeySaved
+    && comparableUrl(backendUrl) === comparableUrl(backendState.backendUrl ?? "");
+  const backendReady = selfHosted
+    ? !!backendUrl.trim() && (!!publishableKey.trim() || savedKeyMatches)
+    : backendState.officialBackendConfigured;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setMessage(null);
     try {
+      const configured = await invoke<{ auth: AuthSnapshot }>("auth.configureBackend", {
+        selfHosted,
+        backendUrl: selfHosted ? backendUrl : undefined,
+        publishableKey: selfHosted ? publishableKey : undefined,
+      });
+      setBackendState(configured.auth);
+      if (selfHosted) setPublishableKey("");
       const method = isSignUp ? "auth.signUp" : "auth.signIn";
       const payload = await invoke<AccountPayload>(method, { email, password });
       if (payload.auth.status === "authenticated") {
@@ -51,12 +70,26 @@ export function AuthGate({ backendConfigured, onAuthenticated }: { backendConfig
         <p>{isSignUp ? "Create a Nuvio account and keep your setup in sync." : "Sign in to load your real profiles and synced addons."}</p>
 
         <form onSubmit={submit}>
+          <label className="self-host-toggle">
+            <input
+              type="checkbox"
+              checked={selfHosted}
+              disabled={busy}
+              onChange={(event) => { setSelfHosted(event.target.checked); setMessage(null); }}
+            />
+            <span><strong>Self-hosted backend</strong><small>Connect this client to your own Nuvio server.</small></span>
+          </label>
+          {selfHosted && <fieldset className="self-host-fields">
+            <label>Backend URL<input type="url" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={backendUrl} onChange={(event) => setBackendUrl(event.target.value)} placeholder="https://nuvio.example.com" required /></label>
+            <label>Publishable key<input type="password" autoComplete="off" value={publishableKey} onChange={(event) => setPublishableKey(event.target.value)} placeholder={savedKeyMatches ? "Saved — leave blank to keep it" : "Your Supabase publishable key"} required={!savedKeyMatches} /></label>
+            <small>The URL and public client key stay on this device. HTTPS is strongly recommended for remote servers.</small>
+          </fieldset>}
           <label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required /></label>
           <label>Password<input type="password" autoComplete={isSignUp ? "new-password" : "current-password"} minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" required /></label>
-          <button className="auth-submit" disabled={busy || !backendConfigured}>{busy ? "Connecting…" : isSignUp ? "Create account" : "Sign in"}</button>
+          <button className="auth-submit" disabled={busy || !backendReady}>{busy ? "Connecting…" : isSignUp ? "Create account" : "Sign in"}</button>
         </form>
 
-        {!backendConfigured && <div className="auth-message error">Backend configuration is missing. Add the public Nuvio client values to <code>.env.local</code>.</div>}
+        {!selfHosted && !backendState.officialBackendConfigured && <div className="auth-message error">This build has no official backend configuration. Select self-hosted and enter your server details.</div>}
         {message && <div className="auth-message">{message}</div>}
 
         <button className="auth-switch" disabled={busy} onClick={() => { setIsSignUp((value) => !value); setMessage(null); }}>

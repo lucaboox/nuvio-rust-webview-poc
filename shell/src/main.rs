@@ -14,6 +14,7 @@ mod progress;
 mod settings;
 mod skip_segments;
 mod thumbnail;
+mod updates;
 
 use std::sync::{Arc, Mutex};
 
@@ -79,15 +80,18 @@ async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value
 /// tears down its own runtime. Keep the async bridge responsive and isolate
 /// that work on the runtime's blocking pool.
 fn dispatch_bridge(raw: &str, shared: &SharedState) -> Vec<Value> {
-    let messages = match ipc::handle_player_shared(&raw, shared) {
+    let messages = match ipc::handle_updates_shared(raw) {
         Some(messages) => messages,
-        None => match ipc::handle_downloads_shared(&raw, shared) {
+        None => match ipc::handle_player_shared(&raw, shared) {
             Some(messages) => messages,
-            None => match ipc::handle_content_shared(&raw, shared) {
+            None => match ipc::handle_downloads_shared(&raw, shared) {
                 Some(messages) => messages,
-                None => match shared.lock() {
-                    Ok(mut state) => ipc::handle(&raw, &mut state),
-                    Err(_) => return Vec::new(),
+                None => match ipc::handle_content_shared(&raw, shared) {
+                    Some(messages) => messages,
+                    None => match shared.lock() {
+                        Ok(mut state) => ipc::handle(&raw, &mut state),
+                        Err(_) => return Vec::new(),
+                    },
                 },
             },
         },

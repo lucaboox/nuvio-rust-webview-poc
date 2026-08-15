@@ -1,9 +1,10 @@
-use std::{env, time::Duration};
+use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use url::Url;
 use uuid::Uuid;
 
 const CREDENTIAL_SERVICE: &str = "tv.nuvio.rust-webview-poc";
@@ -14,10 +15,15 @@ struct BackendConfig {
     primary_url: String,
     fallback_url: Option<String>,
     anon_key: String,
+    self_hosted: bool,
 }
 
 impl BackendConfig {
     fn load() -> Option<Self> {
+        Self::load_custom().or_else(Self::load_official)
+    }
+
+    fn load_official() -> Option<Self> {
         let primary_url = config_value("NUVIO_SUPABASE_URL", option_env!("NUVIO_SUPABASE_URL"))?
             .trim()
             .trim_end_matches('/')
@@ -41,7 +47,37 @@ impl BackendConfig {
             primary_url,
             fallback_url,
             anon_key,
+            self_hosted: false,
         })
+    }
+
+    fn load_custom() -> Option<Self> {
+        let stored =
+            serde_json::from_slice::<StoredBackendConfig>(&fs::read(custom_backend_path()).ok()?)
+                .ok()?;
+        Self::custom(&stored.url, &stored.publishable_key).ok()
+    }
+
+    fn custom(url: &str, publishable_key: &str) -> Result<Self> {
+        let primary_url = normalize_backend_url(url)?;
+        let anon_key = publishable_key.trim().to_string();
+        anyhow::ensure!(!anon_key.is_empty(), "Enter the backend publishable key");
+        anyhow::ensure!(
+            anon_key.len() <= 16 * 1024 && !anon_key.contains(['\r', '\n']),
+            "The backend publishable key is invalid"
+        );
+        Ok(Self {
+            primary_url,
+            fallback_url: None,
+            anon_key,
+            self_hosted: true,
+        })
+    }
+
+    fn same_backend(&self, other: &Self) -> bool {
+        self.primary_url == other.primary_url
+            && self.anon_key == other.anon_key
+            && self.self_hosted == other.self_hosted
     }
 
     fn base_urls(&self) -> impl Iterator<Item = &str> {
@@ -49,11 +85,79 @@ impl BackendConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredBackendConfig {
+    url: String,
+    publishable_key: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRefreshSession {
+    backend_url: String,
+    refresh_token: String,
+}
+
 fn config_value(name: &str, compiled: Option<&'static str>) -> Option<String> {
     env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| compiled.map(str::to_string))
+}
+
+fn normalize_backend_url(value: &str) -> Result<String> {
+    let mut url = Url::parse(value.trim()).context("Enter a valid backend URL")?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host().is_some(),
+        "The backend URL must use HTTP or HTTPS"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "The backend URL cannot contain credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "The backend URL cannot contain a query or fragment"
+    );
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn app_data_dir() -> PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(env::temp_dir)
+        .join("Nuvio")
+}
+
+fn custom_backend_path() -> PathBuf {
+    app_data_dir().join("backend.json")
+}
+
+fn save_custom_backend(config: &BackendConfig) -> Result<()> {
+    let path = custom_backend_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("Could not create Nuvio's settings directory")?;
+    }
+    let stored = StoredBackendConfig {
+        url: config.primary_url.clone(),
+        publishable_key: config.anon_key.clone(),
+    };
+    fs::write(path, serde_json::to_vec_pretty(&stored)?)
+        .context("Could not save the self-hosted backend configuration")
+}
+
+fn clear_custom_backend() -> Result<()> {
+    let path = custom_backend_path();
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("Could not clear the self-hosted backend configuration"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +192,10 @@ struct AuthTokenResponse {
 pub struct AuthSnapshot {
     pub status: &'static str,
     pub backend_configured: bool,
+    pub official_backend_configured: bool,
+    pub self_hosted: bool,
+    pub backend_url: Option<String>,
+    pub custom_key_saved: bool,
     pub user_id: Option<String>,
     pub email: Option<String>,
     pub is_anonymous: bool,
@@ -186,10 +294,24 @@ impl Default for AuthService {
 
 impl AuthService {
     pub fn snapshot(&self) -> AuthSnapshot {
+        let self_hosted = self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.self_hosted);
+        let backend_url = self
+            .config
+            .as_ref()
+            .filter(|config| config.self_hosted)
+            .map(|config| config.primary_url.clone());
+        let official_backend_configured = BackendConfig::load_official().is_some();
         match &self.session {
             Some(session) => AuthSnapshot {
                 status: "authenticated",
                 backend_configured: self.config.is_some(),
+                official_backend_configured,
+                self_hosted,
+                backend_url,
+                custom_key_saved: self_hosted,
                 user_id: Some(session.user.id.clone()),
                 email: session.user.email.clone(),
                 is_anonymous: session.user.is_anonymous,
@@ -197,11 +319,57 @@ impl AuthService {
             None => AuthSnapshot {
                 status: "unauthenticated",
                 backend_configured: self.config.is_some(),
+                official_backend_configured,
+                self_hosted,
+                backend_url,
+                custom_key_saved: self_hosted,
                 user_id: None,
                 email: None,
                 is_anonymous: false,
             },
         }
+    }
+
+    pub fn configure_backend(
+        &mut self,
+        self_hosted: bool,
+        url: Option<&str>,
+        publishable_key: Option<&str>,
+    ) -> Result<AuthSnapshot> {
+        let next = if self_hosted {
+            let normalized_url = normalize_backend_url(url.unwrap_or_default())?;
+            let key = publishable_key
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    self.config
+                        .as_ref()
+                        .filter(|config| config.self_hosted && config.primary_url == normalized_url)
+                        .map(|config| config.anon_key.clone())
+                })
+                .context("Enter the backend publishable key")?;
+            BackendConfig::custom(&normalized_url, &key)?
+        } else {
+            BackendConfig::load_official()
+                .context("This build has no official Nuvio backend configuration")?
+        };
+
+        let changed = self
+            .config
+            .as_ref()
+            .is_none_or(|current| !current.same_backend(&next));
+        if self_hosted {
+            save_custom_backend(&next)?;
+        } else {
+            clear_custom_backend()?;
+        }
+        if changed {
+            self.session = None;
+            clear_refresh_token();
+        }
+        self.config = Some(next);
+        Ok(self.snapshot())
     }
 
     pub fn continue_anonymously(&mut self) -> AuthSnapshot {
@@ -227,13 +395,13 @@ impl AuthService {
     }
 
     pub fn restore_session(&mut self) -> Result<bool> {
-        let Some(refresh_token) = load_refresh_token()? else {
-            return Ok(false);
-        };
         let config = self
             .config
             .clone()
             .context("This build has no Nuvio backend configuration")?;
+        let Some(refresh_token) = load_refresh_token(&config)? else {
+            return Ok(false);
+        };
         let response = self.send_with_fallback(&config, |base_url| {
             self.client
                 .post(format!("{base_url}/auth/v1/token?grant_type=refresh_token"))
@@ -298,7 +466,11 @@ impl AuthService {
                         is_anonymous: false,
                     },
                 });
-                save_refresh_token(&refresh_token)?;
+                let config = self
+                    .config
+                    .as_ref()
+                    .context("This build has no Nuvio backend configuration")?;
+                save_refresh_token(config, &refresh_token)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -551,17 +723,32 @@ fn credential_entry() -> Result<keyring::Entry> {
         .context("Windows Credential Manager is unavailable")
 }
 
-fn load_refresh_token() -> Result<Option<String>> {
+fn load_refresh_token(config: &BackendConfig) -> Result<Option<String>> {
     match credential_entry()?.get_password() {
-        Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
+        Ok(value) if !value.trim().is_empty() => Ok(refresh_token_for_backend(&value, config)),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(error).context("could not read the saved Nuvio session"),
     }
 }
 
-fn save_refresh_token(refresh_token: &str) -> Result<()> {
+fn refresh_token_for_backend(value: &str, config: &BackendConfig) -> Option<String> {
+    if let Ok(stored) = serde_json::from_str::<StoredRefreshSession>(value) {
+        return (stored.backend_url == config.primary_url)
+            .then_some(stored.refresh_token)
+            .filter(|token| !token.trim().is_empty());
+    }
+    // Existing releases stored the official refresh token directly. Never
+    // send that unscoped legacy value to a custom backend.
+    (!config.self_hosted).then(|| value.to_string())
+}
+
+fn save_refresh_token(config: &BackendConfig, refresh_token: &str) -> Result<()> {
+    let stored = serde_json::to_string(&StoredRefreshSession {
+        backend_url: config.primary_url.clone(),
+        refresh_token: refresh_token.to_string(),
+    })?;
     credential_entry()?
-        .set_password(refresh_token)
+        .set_password(&stored)
         .context("could not save the Nuvio session in Windows Credential Manager")
 }
 
@@ -623,5 +810,42 @@ mod tests {
         assert_eq!(snapshot.status, "authenticated");
         assert!(snapshot.is_anonymous);
         assert_eq!(auth.profiles().unwrap()[0].name, "Guest");
+    }
+
+    #[test]
+    fn self_hosted_urls_are_normalized_without_changing_their_base_path() {
+        assert_eq!(
+            normalize_backend_url(" https://nuvio.example.com/supabase/ ").unwrap(),
+            "https://nuvio.example.com/supabase"
+        );
+        assert_eq!(
+            normalize_backend_url("http://127.0.0.1:8000/").unwrap(),
+            "http://127.0.0.1:8000"
+        );
+    }
+
+    #[test]
+    fn self_hosted_urls_reject_unsafe_or_ambiguous_values() {
+        assert!(normalize_backend_url("file:///tmp/nuvio").is_err());
+        assert!(normalize_backend_url("https://user:pass@example.com").is_err());
+        assert!(normalize_backend_url("https://example.com?tenant=one").is_err());
+    }
+
+    #[test]
+    fn saved_sessions_are_scoped_to_the_selected_backend() {
+        let first = BackendConfig::custom("https://one.example.com", "key-one").unwrap();
+        let second = BackendConfig::custom("https://two.example.com", "key-two").unwrap();
+        let stored = serde_json::to_string(&StoredRefreshSession {
+            backend_url: first.primary_url.clone(),
+            refresh_token: "refresh-one".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            refresh_token_for_backend(&stored, &first).as_deref(),
+            Some("refresh-one")
+        );
+        assert!(refresh_token_for_backend(&stored, &second).is_none());
+        assert!(refresh_token_for_backend("legacy-token", &first).is_none());
     }
 }

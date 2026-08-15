@@ -97,6 +97,7 @@ impl Default for DownloadManager {
                 record.bytes_downloaded = 0;
             }
         }
+        cleanup_orphaned_artwork(&root, &records);
         Self {
             root,
             records,
@@ -200,14 +201,31 @@ impl DownloadManager {
             self.records[index].status != "downloading",
             "Cancel this download before removing it"
         );
-        let record = self.records.remove(index);
-        if let Some(path) = record.file_path
-            && path.starts_with(&self.root)
-            && path.is_file()
+        let record = self.records[index].clone();
+        let media_parent = if let Some(path) = record
+            .file_path
+            .as_ref()
+            .filter(|path| path.starts_with(&self.root))
         {
-            fs::remove_file(path)?;
+            if path.is_file() {
+                fs::remove_file(path)?;
+            }
+            path.parent().map(Path::to_path_buf)
+        } else {
+            None
+        };
+
+        self.records.remove(index);
+        self.persist()?;
+
+        // Directory and artwork cleanup is deliberately best-effort. The
+        // download has already been removed successfully, so a locked folder
+        // or image must not resurrect its database entry.
+        if let Some(parent) = media_parent {
+            cleanup_empty_ancestors(&parent, &self.root);
         }
-        self.persist()
+        cleanup_removed_artwork(&self.root, &record, &self.records);
+        Ok(())
     }
 
     pub fn retry(&mut self, id: &str) -> Result<()> {
@@ -557,6 +575,72 @@ fn cache_artwork(
     Ok(Some(target))
 }
 
+fn cleanup_removed_artwork(root: &Path, removed: &DownloadRecord, remaining: &[DownloadRecord]) {
+    let Some(path) = removed.artwork_path.as_ref() else {
+        return;
+    };
+    let artwork_root = root.join(".artwork");
+    if !path.starts_with(&artwork_root)
+        || remaining
+            .iter()
+            .any(|record| record.artwork_path.as_ref() == Some(path))
+    {
+        return;
+    }
+    if path.is_file()
+        && let Err(error) = fs::remove_file(path)
+    {
+        eprintln!("could not remove cached download artwork: {error}");
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        cleanup_empty_ancestors(parent, root);
+    }
+}
+
+/// The hidden artwork directory is owned entirely by the download manager, so
+/// it is safe to prune files that are no longer referenced by persisted items.
+/// This also repairs artwork left behind by older versions of the app.
+fn cleanup_orphaned_artwork(root: &Path, records: &[DownloadRecord]) {
+    let artwork_root = root.join(".artwork");
+    let Ok(entries) = fs::read_dir(&artwork_root) else {
+        return;
+    };
+    let referenced = records
+        .iter()
+        .filter_map(|record| record.artwork_path.clone())
+        .collect::<HashSet<_>>();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && !referenced.contains(&path)
+            && let Err(error) = fs::remove_file(&path)
+        {
+            eprintln!("could not remove orphaned download artwork: {error}");
+        }
+    }
+    cleanup_empty_ancestors(&artwork_root, root);
+}
+
+/// Remove only empty directories on the path back to (but never including)
+/// the configured download root. It stops at the first non-empty or locked
+/// directory, preserving sibling episodes and any user-created files.
+fn cleanup_empty_ancestors(start: &Path, root: &Path) {
+    let mut current = Some(start);
+    while let Some(directory) = current {
+        if directory == root || !directory.starts_with(root) {
+            break;
+        }
+        match fs::remove_dir(directory) {
+            Ok(()) => current = directory.parent(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = directory.parent();
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 fn validate_request(request: &DownloadRequest) -> Result<()> {
     ensure!(
         !request.title.trim().is_empty(),
@@ -759,6 +843,41 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    fn temporary_download_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("nuvio-download-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn record_with_artwork(id: &str, artwork_path: PathBuf) -> DownloadRecord {
+        DownloadRecord {
+            id: id.into(),
+            request: DownloadRequest {
+                content_id: "tt1".into(),
+                content_type: "series".into(),
+                video_id: format!("tt1:{id}"),
+                title: format!("Episode {id}"),
+                show_name: Some("Example".into()),
+                season: Some(1),
+                episode: id.parse().ok(),
+                poster_url: None,
+                backdrop_url: None,
+                url: "https://example.com/video.mkv".into(),
+                request_headers: HashMap::new(),
+                source_name: String::new(),
+                filename: None,
+            },
+            status: "completed".into(),
+            bytes_downloaded: 1,
+            total_bytes: Some(1),
+            file_path: None,
+            artwork_path: Some(artwork_path),
+            error: None,
+            created_at: 1,
+            skip_segments: Vec::new(),
+        }
+    }
+
     #[test]
     fn sanitizes_windows_filename_characters() {
         assert_eq!(safe_component("Law & Order: SVU?"), "Law & Order_ SVU_");
@@ -786,5 +905,74 @@ mod tests {
             media_path(Path::new("D:/Media"), &request, "mkv")
                 .ends_with("Example/Season 02/S02E03 - Third _ Episode.mkv")
         );
+    }
+
+    #[test]
+    fn removing_the_last_episode_prunes_empty_season_and_show_folders() {
+        let root = temporary_download_root();
+        let season = root.join("Example").join("Season 01");
+        fs::create_dir_all(&season).unwrap();
+        let media = season.join("S01E01.mkv");
+        fs::write(&media, b"video").unwrap();
+
+        fs::remove_file(media).unwrap();
+        cleanup_empty_ancestors(&season, &root);
+
+        assert!(!root.join("Example").exists());
+        assert!(root.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_cleanup_preserves_other_downloads() {
+        let root = temporary_download_root();
+        let first_season = root.join("Example").join("Season 01");
+        let second_season = root.join("Example").join("Season 02");
+        fs::create_dir_all(&first_season).unwrap();
+        fs::create_dir_all(&second_season).unwrap();
+        fs::write(second_season.join("S02E01.mkv"), b"video").unwrap();
+
+        cleanup_empty_ancestors(&first_season, &root);
+
+        assert!(!first_season.exists());
+        assert!(second_season.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_artwork_is_removed_only_after_the_last_download() {
+        let root = temporary_download_root();
+        let artwork = root.join(".artwork").join("tt1.jpg");
+        fs::create_dir_all(artwork.parent().unwrap()).unwrap();
+        fs::write(&artwork, b"image").unwrap();
+        let first = record_with_artwork("1", artwork.clone());
+        let second = record_with_artwork("2", artwork.clone());
+
+        cleanup_removed_artwork(&root, &first, std::slice::from_ref(&second));
+        assert!(artwork.exists());
+
+        cleanup_removed_artwork(&root, &second, &[]);
+        assert!(!artwork.exists());
+        assert!(!root.join(".artwork").exists());
+        assert!(root.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_cleanup_prunes_only_orphaned_artwork() {
+        let root = temporary_download_root();
+        let artwork_root = root.join(".artwork");
+        let referenced = artwork_root.join("kept.jpg");
+        let orphaned = artwork_root.join("orphaned.jpg");
+        fs::create_dir_all(&artwork_root).unwrap();
+        fs::write(&referenced, b"kept").unwrap();
+        fs::write(&orphaned, b"orphaned").unwrap();
+        let record = record_with_artwork("1", referenced.clone());
+
+        cleanup_orphaned_artwork(&root, &[record]);
+
+        assert!(referenced.exists());
+        assert!(!orphaned.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

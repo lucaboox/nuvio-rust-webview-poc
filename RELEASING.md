@@ -36,16 +36,18 @@ From a clean release branch:
 
 ```powershell
 npm run version:set -- 0.1.0-alpha.2
+# Move the shipped notes into a dated [0.1.0-alpha.2] section in CHANGELOG.md.
+npm run release:notes
 npm run prepare:runtime
 npm run check:ui
 cargo test --manifest-path shell/Cargo.toml
-git add package.json package-lock.json shell/Cargo.toml shell/Cargo.lock shell/tauri.conf.json
+git add CHANGELOG.md package.json package-lock.json shell/Cargo.toml shell/Cargo.lock shell/tauri.conf.json
 git commit -m "Release 0.1.0-alpha.2"
 git tag v0.1.0-alpha.2
 git push origin HEAD --tags
 ```
 
-The `Release Nuvio` workflow validates that the tag matches `tauri.conf.json`, builds the x64 NSIS installer, signs its updater artifact, creates the GitHub release, and uploads `latest.json`. The app checks that file from **Settings > Updates**.
+The `Release Nuvio` workflow validates that the tag matches `tauri.conf.json` and that `CHANGELOG.md` contains a matching non-empty version section. It uses that section as the GitHub Release description, builds the x64 NSIS installer, signs its updater artifact, and uploads `latest.json`. The app checks that manifest for updates and reads the public GitHub Releases feed for its in-app changelog.
 
 The workflow downloads the pinned libmpv Windows runtime from the repository's `runtime-libmpv-v0.40.0-465-gf6c116491` dependency release and verifies its recorded SHA-256 before compiling. That dependency release remains a GitHub prerelease so it cannot replace the application updater's latest release.
 

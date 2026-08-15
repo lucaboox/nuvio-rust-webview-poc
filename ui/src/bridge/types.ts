@@ -39,6 +39,10 @@ export type BootstrapResult = {
 export type AuthSnapshot = {
   status: "authenticated" | "unauthenticated";
   backendConfigured: boolean;
+  officialBackendConfigured: boolean;
+  selfHosted: boolean;
+  backendUrl?: string;
+  customKeySaved: boolean;
   userId?: string;
   email?: string;
   isAnonymous: boolean;
@@ -131,10 +135,12 @@ export type MetaTrailer = {
   key: string;
   name: string;
   site: string;
+  size?: number;
   trailerType: string;
   official?: boolean;
   publishedAt?: string;
   seasonNumber?: number;
+  displayName?: string;
 };
 export type ExternalRating = { source: string; value: number };
 

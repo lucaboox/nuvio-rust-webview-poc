@@ -2,7 +2,7 @@
 
 An experimental Windows desktop client built with Rust, Tauri, React, TypeScript, WebView2, and direct libmpv playback. Read [ARCHITECTURE.md](./ARCHITECTURE.md) for the original repository audit, reuse boundaries, IPC design, player adaptation, and staged migration plan.
 
-The install/update release process is documented in [RELEASING.md](./RELEASING.md). The current application version is **0.1 Alpha 1** (`0.1.0-alpha.1`).
+The install/update release process is documented in [RELEASING.md](./RELEASING.md). The current application version is **0.1 Alpha 2** (`0.1.0-alpha.2`).
 
 ## What works
 
@@ -11,7 +11,7 @@ The install/update release process is documented in [RELEASING.md](./RELEASING.m
 - React calls the existing typed Rust command bridge through Tauri IPC.
 - Rust returns correlated responses and unsolicited events to JavaScript.
 - The UI provides a responsive Nuvio-style navigation and real addon-backed home shell.
-- Email/password sign-in and sign-up use Nuvio's real Supabase Auth endpoint.
+- Email/password sign-in and sign-up support either Nuvio's bundled Supabase endpoint or a user-selected self-hosted Nuvio backend.
 - Profiles and installed addon rows are loaded read-only from the authenticated account.
 - Guest mode, profile switching, addon refresh, and sign-out are wired end to end.
 - Enabled Stremio-compatible addon manifests and home/search catalogs load through Rust with partial-failure handling.
@@ -26,7 +26,7 @@ The install/update release process is documented in [RELEASING.md](./RELEASING.m
 - **Settings > Downloads** provides a native folder picker and safely moves completed media and cached artwork to a new location.
 - Signed application updates can be checked and installed from **Settings > Updates**.
 
-This remains an incremental POC: it supports Stremio-compatible addon HTTP resources but does not execute Nuvio QuickJS plugins, and torrent-only sources still need a resolver/debrid layer before libmpv can open them. Offline downloads currently require a direct file response; segmented HLS/DASH manifests are rejected rather than saved as incomplete media. The Supabase refresh token is stored in Windows Credential Manager; access tokens remain memory-only and sign-out removes the saved credential.
+This remains an incremental POC: it supports Stremio-compatible addon HTTP resources but does not execute Nuvio QuickJS plugins, and torrent-only sources still need a resolver/debrid layer before libmpv can open them. Offline downloads currently require a direct file response; segmented HLS/DASH manifests are rejected rather than saved as incomplete media. The Supabase refresh token is stored in Windows Credential Manager and scoped to its backend; access tokens remain memory-only and sign-out removes the saved credential.
 
 ## Prerequisites
 
@@ -49,7 +49,7 @@ npm.cmd run tauri -- dev --config shell/tauri.conf.json
 
 The UI must be built before a direct Cargo build because the shell embeds `ui/dist` at compile time. Direct Cargo commands also need the pinned Windows libmpv runtime prepared first. Tauri commands handle both through `beforeBuildCommand`; the runtime download is SHA-256 verified and then reused locally.
 
-The local `.env.local` contains the same public Supabase client URL and anon key embedded in official Nuvio builds. It is ignored by Git. Use `.env.example` when configuring another checkout.
+The local `.env.local` contains the public Supabase client URL and key embedded in official builds. It is ignored by Git. Use `.env.example` when configuring another checkout. At runtime, the login screen's **Self-hosted backend** option can override those compiled values with a Supabase/Nuvio base URL and publishable key. That public client configuration is kept locally in Nuvio's application-data directory and reused on later launches; it is never written to the repository or synced to an account.
 
 Sign in with an existing Nuvio account to test real profiles and the read-only Addons page, or use guest mode. Use **Test round trip** to exercise React → Rust → React communication. **Play prototype** exercises the player command and Rust → React event path; it reports that libmpv is intentionally not loaded.
 

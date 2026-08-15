@@ -739,10 +739,12 @@ fn parse_tmdb_trailers(value: Option<&Value>) -> Vec<MetaTrailer> {
                 key,
                 name: string(item, "name").unwrap_or_else(|| "Trailer".to_string()),
                 site: "YouTube".to_string(),
+                size: item.get("size").and_then(Value::as_i64),
                 trailer_type: string(item, "type").unwrap_or_else(|| "Trailer".to_string()),
                 official: item.get("official").and_then(Value::as_bool),
                 published_at: string(item, "published_at"),
                 season_number: None,
+                display_name: None,
             })
         })
         .collect()
