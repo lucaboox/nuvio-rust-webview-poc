@@ -1479,31 +1479,93 @@ fn value_string_list(value: &Value, key: &str) -> Vec<String> {
     }
 }
 
+/// Mirrors Nuvio's `AddonManifestParser.resources` and the filter in
+/// `StreamsRepository`: a resource that declares no types or id prefixes
+/// inherits the manifest's, rather than meaning "anything goes".
 fn supports(manifest: &Manifest, resource_name: &str, content_type: &str, id: &str) -> bool {
-    manifest.resources.iter().any(|resource| match resource {
-        Resource::Name(name) => {
-            name == resource_name
-                && compatible(&manifest.types, &manifest.id_prefixes, content_type, id)
-        }
-        Resource::Detailed {
-            name,
-            types,
-            id_prefixes,
-        } => name == resource_name && compatible(types, id_prefixes, content_type, id),
+    manifest.resources.iter().any(|resource| {
+        let (name, types, prefixes) = match resource {
+            Resource::Name(name) => (name, &manifest.types, &manifest.id_prefixes),
+            Resource::Detailed {
+                name,
+                types,
+                id_prefixes,
+            } => (
+                name,
+                if types.is_empty() {
+                    &manifest.types
+                } else {
+                    types
+                },
+                if id_prefixes.is_empty() {
+                    &manifest.id_prefixes
+                } else {
+                    id_prefixes
+                },
+            ),
+        };
+        name == resource_name && compatible(types, prefixes, content_type, id)
     })
 }
 
+/// The type has to be declared. Treating an empty list as a wildcard, as this
+/// once did, queries addons Nuvio never would — and since a stream lookup
+/// reports failure only when every addon fails, those extra failures are what
+/// turn one broken addon into an error for the whole sheet.
 fn compatible(types: &[String], prefixes: &[String], content_type: &str, id: &str) -> bool {
-    (types.is_empty() || types.iter().any(|value| value == content_type))
+    types.iter().any(|value| value == content_type)
         && (prefixes.is_empty() || prefixes.iter().any(|prefix| id.starts_with(prefix)))
 }
 
+/// Redirect hops allowed before an addon is treated as looping.
+const MAX_ADDON_REDIRECTS: usize = 5;
+
+/// Follows a redirect chain by hand, checking every hop.
+///
+/// Nuvio follows redirects (`followRedirects = true` in `AddonPlatform`), and
+/// addons rely on it: `http` to `https`, apex to `www`, trailing-slash
+/// normalisation and Cloudflare all answer 3xx. Refusing to follow turns every
+/// one of those into "Addon returned HTTP 301" and loses the addon entirely.
+///
+/// The reason the client sets `Policy::none()` is still good — a redirect is
+/// how a public addon URL would be turned into a request against a local
+/// service — so this walks the chain here instead, where each hop goes through
+/// the same host check the first request did. reqwest's own policy would have
+/// to run that check inside its runtime, and the DNS lookup it makes is
+/// blocking.
+fn get_with_redirects(client: &Client, url: &str) -> Result<(String, reqwest::blocking::Response)> {
+    let mut current = url.to_string();
+    for _ in 0..=MAX_ADDON_REDIRECTS {
+        validate_addon_url(&Url::parse(&current).context("invalid addon resource URL")?)?;
+        let response = client
+            .get(&current)
+            .send()
+            .with_context(|| format!("Request failed: {current}"))?;
+        if !response.status().is_redirection() {
+            return Ok((current, response));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .with_context(|| {
+                format!("Addon returned HTTP {} with no location: {current}", response.status())
+            })?;
+        // A Location may be relative, and is resolved against the URL that
+        // produced it rather than against the original.
+        current = Url::parse(&current)
+            .context("invalid addon resource URL")?
+            .join(&location)
+            .with_context(|| format!("Addon redirected to an unusable location: {location}"))?
+            .to_string();
+    }
+    bail!("Addon redirected more than {MAX_ADDON_REDIRECTS} times: {url}")
+}
+
 fn get_json<T: for<'de> Deserialize<'de>>(client: &Client, url: &str) -> Result<T> {
-    validate_addon_url(&Url::parse(url).context("invalid addon resource URL")?)?;
-    let mut response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("Request failed: {url}"))?;
+    let (url, mut response) = get_with_redirects(client, url)?;
+    let url = url.as_str();
     let status = response.status();
     if !status.is_success() {
         bail!("Addon returned HTTP {status}: {url}");
@@ -1702,6 +1764,112 @@ mod tests {
     #[test]
     fn encodes_utf8_components() {
         assert_eq!(encode_component("Amélie: 1"), "Am%C3%A9lie%3A%201");
+    }
+
+    /// Nuvio's `buildAddonResourceUrl`, transcribed from
+    /// `composeApp/.../addons/AddonTransportUrls.kt`. It concatenates strings
+    /// rather than going through a URL parser, so pinning against it catches
+    /// anywhere the parser round-trip here changes a byte the addon will see.
+    fn nuvio_resource_url(manifest_url: &str, resource: &str, content_type: &str, id: &str) -> String {
+        let base = manifest_url
+            .split('?')
+            .next()
+            .unwrap_or(manifest_url)
+            .strip_suffix("/manifest.json")
+            .unwrap_or_else(|| manifest_url.split('?').next().unwrap_or(manifest_url));
+        let query = match manifest_url.split_once('?') {
+            Some((_, query)) if !query.trim().is_empty() => format!("?{query}"),
+            _ => String::new(),
+        };
+        format!(
+            "{base}/{resource}/{content_type}/{}.json{query}",
+            encode_component(id)
+        )
+    }
+
+    fn manifest_with(
+        types: &[&str],
+        id_prefixes: &[&str],
+        resources: Vec<Resource>,
+    ) -> Manifest {
+        Manifest {
+            id: "example".to_string(),
+            name: "Example".to_string(),
+            version: "1.0.0".to_string(),
+            logo: None,
+            types: types.iter().map(|value| value.to_string()).collect(),
+            id_prefixes: id_prefixes.iter().map(|value| value.to_string()).collect(),
+            resources,
+            catalogs: Vec::new(),
+            behavior_hints: ManifestBehaviorHints::default(),
+        }
+    }
+
+    #[test]
+    fn resource_types_fall_back_to_the_manifest_like_nuvio() {
+        let detailed = |types: &[&str], prefixes: &[&str]| Resource::Detailed {
+            name: "stream".to_string(),
+            types: types.iter().map(|value| value.to_string()).collect(),
+            id_prefixes: prefixes.iter().map(|value| value.to_string()).collect(),
+        };
+
+        // A resource declaring nothing inherits the manifest's types.
+        let inherits = manifest_with(&["movie", "series"], &[], vec![detailed(&[], &[])]);
+        assert!(supports(&inherits, "stream", "movie", "tt0111161"));
+        assert!(!supports(&inherits, "stream", "channel", "tt0111161"));
+
+        // Its own types win where it has them.
+        let narrowed = manifest_with(&["movie", "series"], &[], vec![detailed(&["series"], &[])]);
+        assert!(supports(&narrowed, "stream", "series", "tt0903747:1:1"));
+        assert!(!supports(&narrowed, "stream", "movie", "tt0111161"));
+
+        // Prefixes inherit the same way, and are checked against the id.
+        let prefixed = manifest_with(&["series"], &["tt"], vec![detailed(&[], &[])]);
+        assert!(supports(&prefixed, "stream", "series", "tt0903747:1:1"));
+        assert!(!supports(&prefixed, "stream", "series", "kitsu:12345"));
+
+        // The short form has always inherited; that must not regress.
+        let short = manifest_with(
+            &["movie"],
+            &[],
+            vec![Resource::Name("stream".to_string())],
+        );
+        assert!(supports(&short, "stream", "movie", "tt0111161"));
+        assert!(!supports(&short, "meta", "movie", "tt0111161"));
+
+        // A manifest declaring no types at all matches nothing, as in Nuvio.
+        let untyped = manifest_with(&[], &[], vec![detailed(&[], &[])]);
+        assert!(!supports(&untyped, "stream", "movie", "tt0111161"));
+    }
+
+    #[test]
+    fn resource_urls_match_nuvio_byte_for_byte() {
+        // A series id, whose colons are the part addons are pickiest about, and
+        // an AIOStreams-style manifest carrying its configuration in the path.
+        let cases = [
+            ("https://example.com/a/manifest.json", "stream", "series", "tt0903747:1:1"),
+            ("https://example.com/a/manifest.json", "stream", "movie", "tt0111161"),
+            (
+                "https://aio.example.com/stremio/eyJhIjoxLCJiIjoiYy1kX2UifQ==/manifest.json",
+                "stream",
+                "series",
+                "tt0903747:5:14",
+            ),
+            (
+                "https://example.com/addon/manifest.json?token=abc-123_x",
+                "stream",
+                "movie",
+                "tt0111161",
+            ),
+            ("https://example.com/a/manifest.json", "meta", "series", "kitsu:12345"),
+        ];
+        for (manifest, resource, content_type, id) in cases {
+            assert_eq!(
+                resource_url(manifest, resource, content_type, id, None).unwrap(),
+                nuvio_resource_url(manifest, resource, content_type, id),
+                "diverged for {manifest} {resource}/{content_type}/{id}"
+            );
+        }
     }
 
     #[test]
