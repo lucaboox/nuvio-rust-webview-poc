@@ -100,6 +100,8 @@ export type Video = {
   seasonPoster?: string;
   overview?: string;
   runtime?: number;
+  /** Per-episode score, shown over the thumbnail. */
+  imdbRating?: string;
   available: boolean;
 };
 
@@ -356,6 +358,32 @@ export type StreamSource = {
       response?: Record<string, string>;
     };
   };
+  clientResolve?: {
+    type?: string;
+    infoHash?: string;
+    fileIdx?: number;
+    magnetUri?: string;
+    torrentName?: string;
+    filename?: string;
+    service?: string;
+    isCached?: boolean;
+    stream?: {
+      raw?: {
+        torrentName?: string;
+        filename?: string;
+        size?: number;
+        folderSize?: number;
+        parsed?: {
+          raw_title?: string;
+          parsed_title?: string;
+          resolution?: string;
+          quality?: string;
+          hdr?: string[];
+          codec?: string;
+        };
+      };
+    };
+  };
   addonLogo?: string;
 };
 
@@ -410,11 +438,22 @@ export type AddonDescriptor = {
 
 export type SettingsSnapshot = {
   amoledEnabled: boolean;
+  continueWatchingVisible: boolean;
+  continueWatchingStyle: "Card" | "Wide" | "Poster";
+  continueWatchingUpNextFromFurthestEpisode: boolean;
+  continueWatchingUseEpisodeThumbnails: boolean;
+  continueWatchingShowUnairedNextUp: boolean;
+  continueWatchingBlurNextUp: boolean;
   /** Next-up cards hidden from Continue Watching, by nextUpDismissKey. */
   dismissedNextUp: string[];
+  continueWatchingShowResumePromptOnLaunch: boolean;
+  continueWatchingSortMode:
+    | "DEFAULT"
+    | "STREAMING_STYLE"
+    | "SPLIT_UPCOMING";
   showLoadingOverlay: boolean;
   showParentalGuide: boolean;
-  resizeMode: "Fit" | "Fill" | "Zoom" | "Stretch";
+  resizeMode: "Fit" | "Zoom" | "Stretch";
   preferredAudioLanguage: string;
   preferredSubtitleLanguage: string;
   subtitleBold: boolean;
@@ -447,7 +486,10 @@ export type SettingsSnapshot = {
   subtitlePreferredLanguagesOnly: boolean;
   secondaryAudioLanguage: string;
   secondarySubtitleLanguage: string;
-  addonSubtitleStartupMode: "ALL_SUBTITLES" | "PREFERRED_ONLY" | "NONE";
+  addonSubtitleStartupMode:
+    | "FAST_STARTUP"
+    | "PREFERRED_ONLY"
+    | "ALL_SUBTITLES";
   useLibass: boolean;
   // Autoplay
   autoplaySource: string;
@@ -460,9 +502,6 @@ export type SettingsSnapshot = {
   autoplayNextEpisodeFallback: boolean;
   // Skipping
   animeSkipEnabled: boolean;
-  animeSkipClientId: string;
-  introDbApiKey: string;
-  introSubmitEnabled: boolean;
   // Gestures (synced by Nuvio)
   holdToSpeed: boolean;
   holdToSpeedValue: number;
@@ -471,4 +510,54 @@ export type SettingsSnapshot = {
   externalPlayerId: string;
   externalPlayerForwardSubtitles: boolean;
   externalPlayerSendSkipSegments: boolean;
+  // TMDB enrichment. Credentials are loaded separately and never included in
+  // account/bootstrap settings payloads.
+  tmdbEnabled: boolean;
+  tmdbLanguage: string;
+  tmdbUseTrailers: boolean;
+  tmdbUseArtwork: boolean;
+  tmdbUseBasicInfo: boolean;
+  tmdbUseDetails: boolean;
+  tmdbUseReleaseDates: boolean;
+  tmdbUseCredits: boolean;
+  tmdbUseProductions: boolean;
+  tmdbUseNetworks: boolean;
+  tmdbUseEpisodes: boolean;
+  tmdbUseSeasonPosters: boolean;
+  tmdbUseMoreLikeThis: boolean;
+  tmdbUseCollections: boolean;
+  // MDBList ratings
+  mdbListEnabled: boolean;
+  mdbListUseImdb: boolean;
+  mdbListUseTmdb: boolean;
+  mdbListUseTomatoes: boolean;
+  mdbListUseMetacritic: boolean;
+  mdbListUseTrakt: boolean;
+  mdbListUseLetterboxd: boolean;
+  mdbListUseAudience: boolean;
+  mdbListUseMal: boolean;
+  // Debrid credentials are loaded separately through integrations.credentials.
+  debridEnabled: boolean;
+  debridCloudLibraryEnabled: boolean;
+  debridPreferredResolverProviderId: string;
+  debridInstantPlaybackPreparationLimit: number;
+  debridStreamMaxResults: number;
+  debridStreamSortMode: "DEFAULT" | "QUALITY_DESC" | "SIZE_DESC" | "SIZE_ASC";
+  debridStreamMinimumQuality: "ANY" | "P720" | "P1080" | "P2160";
+  debridStreamDolbyVisionFilter: "ANY" | "EXCLUDE" | "ONLY";
+  debridStreamHdrFilter: "ANY" | "EXCLUDE" | "ONLY";
+  debridStreamCodecFilter: "ANY" | "H264" | "HEVC" | "AV1";
+  debridStreamPreferences: string;
+  debridStreamNameTemplate: string;
+  debridStreamDescriptionTemplate: string;
+};
+
+export type IntegrationCredentials = {
+  tmdbApiKey: string;
+  mdbListApiKey: string;
+  animeSkipClientId: string;
+  introDbApiKey: string;
+  torboxApiKey: string;
+  premiumizeApiKey: string;
+  realDebridApiKey: string;
 };

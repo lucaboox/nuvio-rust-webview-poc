@@ -6,15 +6,15 @@ import { Icon } from "./Icon";
 import { EpisodeBadge, latestResumeFor, resumeForVideo, watchStateForContent, watchStateForEpisode } from "./WatchStatus";
 import { EpisodeContextMenu, showEpisodeContextMenu } from "./EpisodeMenu";
 import { getWatchedOverride, reconcileWatchedOverrides, useWatchedOverrides, watchedKey } from "../data/watchedOverrides";
+import { applyDebridStreamSettings } from "../data/debridStreams";
 import { isInLibrary, setLibraryMembership } from "../data/libraryCache";
 import { cachedStreamToSource, contentKey, getValidStreamLink, saveStreamLink } from "../data/streamLinkCache";
-import { getBingeGroup } from "../data/bingeGroupCache";
 import {
   autoplayCandidates,
-  selectAutoplayFallback,
-  selectPreferredBingeGroup,
+  selectInitialAutoplay,
   waitForAutoplayWindow,
 } from "../data/streamAutoplay";
+import { currentSeriesVideo } from "../data/seriesProgress";
 
 /**
  * Enriched metadata survives navigation, so returning to a title does not
@@ -27,7 +27,7 @@ export function cachedDetailsKey(item: Pick<ContentMeta, "id" | "contentType">) 
   return `${item.contentType}:${item.id}`;
 }
 
-export type PlayContext = { title: string; startPositionMs: number; contentId: string; contentType: string; videoId: string; season?: number; episode?: number; videos?: Video[]; showName?: string; backdrop?: string; logo?: string; offline?: boolean };
+export type PlayContext = { title: string; startPositionMs: number; contentId: string; contentType: string; videoId: string; season?: number; episode?: number; videos?: Video[]; showName?: string; backdrop?: string; logo?: string; ageRating?: string; originalLanguage?: string; offline?: boolean };
 
 export function DetailsPage({ seed, progress, settings, autoOpenSources, onBack, onPlay, onPersonSelect, onLibraryChange, onProgressChanged }: { seed: ContentMeta; progress: ProgressSnapshot; settings?: SettingsSnapshot | null; autoOpenSources?: boolean; onBack(): void; onPlay(stream: StreamSource, context: PlayContext): void; onPersonSelect?(person: MetaPerson): void; onLibraryChange?(): void; onProgressChanged?(): void }) {
   const [details, setDetails] = useState(seed);
@@ -65,11 +65,13 @@ export function DetailsPage({ seed, progress, settings, autoOpenSources, onBack,
     function applyMeta(result: ContentMeta, usableResume: ResumePoint | null) {
       setDetails(result);
       setResume(usableResume);
-      const requested = result.videos.find((video) => video.id === seed.selectedVideoId);
-      const resumed = result.videos.find((video) => video.id === usableResume?.videoId);
-      const defaultVideo = result.videos.find((video) => video.id === result.defaultVideoId);
-      const firstRegularEpisode = firstEpisode(result.videos);
-      const initial = requested ?? resumed ?? (defaultVideo?.season === 0 ? null : defaultVideo) ?? firstRegularEpisode ?? result.videos[0];
+      const initial = currentSeriesVideo(
+        result.videos,
+        result.id,
+        progress,
+        seed.selectedVideoId,
+        result.defaultVideoId,
+      );
       setFocusedVideo(initial ?? null);
       setSeason(initial?.season ?? orderSeasons([...new Set(result.videos.map((video) => video.season ?? 0))])[0] ?? null);
       setSaved(isInLibrary(result));
@@ -141,6 +143,7 @@ export function DetailsPage({ seed, progress, settings, autoOpenSources, onBack,
           videoId: playableId, season: target?.season, episode: target?.episode,
           videos: details.videos, showName: details.name,
           backdrop: details.background || details.banner, logo: details.logo,
+          ageRating: details.ageRating, originalLanguage: details.language,
         });
         return;
       }
@@ -239,12 +242,12 @@ export function DetailsPage({ seed, progress, settings, autoOpenSources, onBack,
     {(details.director.length > 0 || details.writer.length > 0 || details.language) && <section className="credits-strip">{details.director.length > 0 && <Credit label="Director" value={details.director.join(", ")} />}{details.writer.length > 0 && <Credit label="Writer" value={details.writer.join(", ")} />}{details.language && <Credit label="Language" value={details.language} />}</section>}
     {details.cast.length > 0 && <section className="people-section"><div className="section-title"><span>CAST</span><h2>Actors & creators</h2></div><div className="people-row">{details.cast.map((person) => <button type="button" className="person-card" disabled={!person.tmdbId || !onPersonSelect} title={person.tmdbId ? `View ${person.name}` : undefined} onClick={() => onPersonSelect?.(person)} key={`${person.tmdbId ?? person.name}:${person.role ?? ""}`}>{person.photo ? <img src={person.photo} alt="" /> : <div className="person-placeholder">{person.name.slice(0, 1)}</div>}<strong>{person.name}</strong>{person.role && <span>{person.role}</span>}</button>)}</div></section>}
     </main>
-    {isSeries && <section className="episodes-section"><div className="episodes-heading"><div><span>EPISODES</span><h2>{details.name}</h2></div><label className="season-select-wrap"><span>Season</span><select value={season ?? seasons[0] ?? 0} onChange={(event) => { const next = Number(event.target.value); setSeason(next); setEpisodeQuery(""); setFocusedVideo(details.videos.find((video) => (video.season ?? 0) === next) ?? null); episodeListRef.current?.scrollTo({ top: 0 }); }}>{seasons.map((item) => <option value={item} key={item}>{item === 0 ? "Specials" : `Season ${item}`}</option>)}</select></label></div><label className="episode-search"><Icon name="search" size={19} /><input value={episodeQuery} onChange={(event) => setEpisodeQuery(event.target.value)} placeholder="Search this season" /></label><div className="episode-list-heading"><strong>{season === 0 ? "Specials" : `Season ${season ?? seasons[0] ?? 1}`}</strong><span>{visibleEpisodes.length} episodes</span></div><div className="episode-grid" ref={episodeListRef}>{visibleEpisodes.map((video, index) => <button className={focusedVideo?.id === video.id ? "episode-card selected" : "episode-card"} key={video.id} onClick={() => openSources(video)} onContextMenu={(event) => showEpisodeContextMenu(event, { details, video, watched: getWatchedOverride(watchedKey(details.id, video.season, video.episode)) ?? (watchStateForEpisode(details.id, video.season, video.episode, video.id, progress)?.watched === true) })}><div className="episode-thumb">{video.thumbnail ? <img src={video.thumbnail} alt="" /> : <div className="episode-placeholder"><Icon name="play" /></div>}<EpisodeBadge contentId={details.id} videoId={video.id} season={video.season} episode={video.episode} snapshot={progress} /></div><div><small>{video.episode ? `EPISODE ${video.episode}` : `EPISODE ${index + 1}`}{video.released ? ` · ${formatDate(video.released)}` : ""}</small><strong>{video.title || `Episode ${video.episode ?? index + 1}`}</strong><span>{video.overview || (video.available === false ? "Not available yet" : "Select to choose a source")}</span></div></button>)}</div></section>}
+    {isSeries && <section className="episodes-section"><div className="episodes-heading"><div><span>EPISODES</span><h2>{details.name}</h2></div><label className="season-select-wrap"><span>Season</span><select value={season ?? seasons[0] ?? 0} onChange={(event) => { const next = Number(event.target.value); setSeason(next); setEpisodeQuery(""); setFocusedVideo(details.videos.find((video) => (video.season ?? 0) === next) ?? null); episodeListRef.current?.scrollTo({ top: 0 }); }}>{seasons.map((item) => <option value={item} key={item}>{item === 0 ? "Specials" : `Season ${item}`}</option>)}</select></label></div><label className="episode-search"><Icon name="search" size={19} /><input value={episodeQuery} onChange={(event) => setEpisodeQuery(event.target.value)} placeholder="Search this season" /></label><div className="episode-list-heading"><strong>{season === 0 ? "Specials" : `Season ${season ?? seasons[0] ?? 1}`}</strong><span>{visibleEpisodes.length} episodes</span></div><div className="episode-grid" ref={episodeListRef}>{visibleEpisodes.map((video, index) => <button className={focusedVideo?.id === video.id ? "episode-card selected" : "episode-card"} key={video.id} onClick={() => openSources(video)} onContextMenu={(event) => showEpisodeContextMenu(event, { details, video, watched: getWatchedOverride(watchedKey(details.id, video.season, video.episode)) ?? (watchStateForEpisode(details.id, video.season, video.episode, video.id, progress)?.watched === true) })}><div className="episode-thumb">{video.thumbnail ? <img src={video.thumbnail} alt="" /> : <div className="episode-placeholder"><Icon name="play" /></div>}<EpisodeBadge contentId={details.id} videoId={video.id} season={video.season} episode={video.episode} snapshot={progress} />{video.imdbRating && <i className="episode-imdb">IMDb {video.imdbRating}</i>}</div><div><small>{video.episode ? `EPISODE ${video.episode}` : `EPISODE ${index + 1}`}{video.released ? ` · ${formatDate(video.released)}` : ""}</small><strong>{video.title || `Episode ${video.episode ?? index + 1}`}</strong><span>{video.overview || (video.available === false ? "Not available yet" : "Select to choose a source")}</span></div></button>)}</div></section>}
     <EpisodeContextMenu onChanged={() => onProgressChanged?.()} />
     {sourceTarget && <SourcePicker key={sourceTarget.id} target={sourceTarget} details={details} contentId={details.id} contentType={details.contentType} settings={settings} onClose={() => setSourceTarget(null)} onPlay={(stream, context) => {
       // Remember the pick so "Reuse last stream" can skip the picker next time.
       saveStreamLink(contentKey(details.contentType, context.videoId, details.id, context.season, context.episode), stream);
-      onPlay(stream, { ...context, videos: details.videos, showName: details.name, backdrop: details.background || details.banner, logo: details.logo });
+      onPlay(stream, { ...context, videos: details.videos, showName: details.name, backdrop: details.background || details.banner, logo: details.logo, ageRating: details.ageRating, originalLanguage: details.language });
     }} />}
     {showDescription && <DetailsModal title={details.name} onClose={() => setShowDescription(false)}><p className="details-modal-description">{description}</p></DetailsModal>}
     {showTrailers && <TrailerModal trailers={details.trailers} onClose={() => setShowTrailers(false)} />}
@@ -500,19 +503,19 @@ function SourcePicker({ target, details, contentId, contentType, settings, onClo
     try {
       const fetched = (await invoke<{ streams: StreamSource[] }>("content.streams", { type: contentType, id: target.id })).streams;
       if (generation !== selectionGeneration.current) return;
-      setStreams(fetched);
+      const prepared = applyDebridStreamSettings(fetched, settings);
+      setStreams(prepared);
       if (!allowAutoPlay || autoAttempted.current) return;
       autoAttempted.current = true;
-      const candidates = autoplayCandidates(fetched, settings, false);
-      const rememberedGroup = settings?.autoplayPreferBingeGroup && settings.autoplayReuseBingeGroup
-        ? getBingeGroup(contentId)
-        : null;
-      const preferred = selectPreferredBingeGroup(candidates, rememberedGroup);
-      if (preferred && generation === selectionGeneration.current) { play(preferred); return; }
+      const candidates = autoplayCandidates(prepared, settings, false);
+      // A remembered binge group belongs to the in-player next-episode flow.
+      // Applying it here allowed an ordinary episode click to bypass Manual
+      // source selection as soon as the source request completed.
+      const initial = selectInitialAutoplay(candidates, settings);
+      if (!initial) return;
       await waitForAutoplayWindow(startedAt, settings?.autoplayTimeoutSeconds);
       if (generation !== selectionGeneration.current) return;
-      const fallback = selectAutoplayFallback(candidates, settings, false);
-      if (fallback) play(fallback);
+      play(initial);
     }
     catch (reason) {
       if (generation === selectionGeneration.current)
@@ -588,18 +591,20 @@ function SourcePicker({ target, details, contentId, contentType, settings, onClo
       <div className="source-filters"><button className="source-refresh" aria-label="Refresh sources" title="Refresh sources" onClick={() => { void fetchStreams(false); }}><Icon name="refresh" size={20} /></button><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>All</button>{addonGroups.map((group) => <button className={filter === group.id ? "active" : ""} key={group.id} onClick={() => setFilter(group.id)}>{group.logo && <img src={group.logo} alt="" />}{group.name}</button>)}</div>
       {downloadNotice && <div className="source-download-notice">{downloadBusy && <i className="loading-spinner" />}{downloadNotice}</div>}
       {error && <div className="inline-error">{error}</div>}
-      {!streams && !error ? <div className="sources-loading"><i className="loading-spinner" /><strong>Checking stream addons</strong></div> : streams?.length === 0 ? <div className="source-empty">No compatible source was returned.</div> : <div className="source-groups">{visibleGroups.map((group) => <section className="source-group" key={group.id}><div className="source-group-heading">{group.logo && <img src={group.logo} alt="" />}<strong>{group.name}</strong><span>{group.streams.length}</span></div><div className="source-list">{group.streams.map((stream, index) => <StreamButton key={`${group.id}:${index}`} stream={stream} index={index} onClick={() => play(stream)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setDownloadMenu({ stream, x: event.clientX, y: event.clientY }); }} />)}</div></section>)}</div>}
+      {!streams && !error ? <div className="sources-loading"><i className="loading-spinner" /><strong>Checking stream addons</strong></div> : streams?.length === 0 ? <div className="source-empty">No compatible source was returned.</div> : <div className="source-groups">{visibleGroups.map((group) => <section className="source-group" key={group.id}><div className="source-group-heading">{group.logo && <img src={group.logo} alt="" />}<strong>{group.name}</strong><span>{group.streams.length}</span></div><div className="source-list">{group.streams.map((stream, index) => <StreamButton key={`${group.id}:${index}`} stream={stream} index={index} settings={settings} onClick={() => play(stream)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setDownloadMenu({ stream, x: event.clientX, y: event.clientY }); }} />)}</div></section>)}</div>}
     </section>
     {downloadMenu && <><button className="source-menu-dismiss" aria-label="Close source menu" onClick={() => setDownloadMenu(null)} /><div className="source-context-menu" role="menu" style={{ left: Math.min(downloadMenu.x, window.innerWidth - 270), top: Math.min(downloadMenu.y, window.innerHeight - 150) }}><strong>Download source</strong><button disabled={downloadBusy || !downloadMenu.stream.url} onClick={() => void queueOne(downloadMenu.stream)}><Icon name="downloads" size={17} />Download this {contentType === "series" ? "episode" : "movie"}</button>{target.season != null && <button disabled={downloadBusy || !downloadMenu.stream.url} onClick={() => void queueSeason(downloadMenu.stream)}><Icon name="episodes" size={17} />Download Season {target.season}</button>}</div></>}
   </div>;
 }
 
-function StreamButton({ stream, index, onClick, onContextMenu }: { stream: StreamSource; index: number; onClick(): void; onContextMenu(event: React.MouseEvent): void }) {
+function StreamButton({ stream, index, settings, onClick, onContextMenu }: { stream: StreamSource; index: number; settings?: SettingsSnapshot | null; onClick(): void; onContextMenu(event: React.MouseEvent): void }) {
   const enabled = !!stream.url || !!stream.externalUrl;
   const title = firstLine(stream.name) || firstLine(stream.title) || `Source ${index + 1}`;
-  const lines = streamDetailLines(stream, title);
-  const badges = streamBadges(stream);
-  return <button className="nuvio-stream-card" disabled={!enabled} onClick={onClick} onContextMenu={onContextMenu}><div className="stream-card-copy"><strong>{title}</strong><div className="stream-detail-lines">{lines.map((line, lineIndex) => <span key={`${lineIndex}:${line}`}>{line}</span>)}</div><div className="stream-badges">{badges.map((badge) => <span key={badge}>{badge}</span>)}</div></div><small>{stream.url ? "PLAY" : stream.externalUrl ? "OPEN" : stream.infoHash ? "RESOLVER NEEDED" : "UNAVAILABLE"}</small></button>;
+  const showFileSize = settings?.showFileSizeBadges !== false;
+  const lines = streamDetailLines(stream, title, showFileSize);
+  const badges = streamBadges(stream, showFileSize);
+  const badgeRow = <div className={settings?.badgePlacement === "TOP" ? "stream-badges is-top" : "stream-badges"}>{badges.map((badge) => <span key={badge}>{badge}</span>)}</div>;
+  return <button className="nuvio-stream-card" disabled={!enabled} onClick={onClick} onContextMenu={onContextMenu}><div className="stream-card-copy">{settings?.badgePlacement === "TOP" && badgeRow}<strong>{title}</strong><div className="stream-detail-lines">{lines.map((line, lineIndex) => <span key={`${lineIndex}:${line}`}>{line}</span>)}</div>{settings?.badgePlacement !== "TOP" && badgeRow}</div><small>{stream.url ? "PLAY" : stream.externalUrl ? "OPEN" : stream.clientResolve ? "RESOLVER NOT PORTED" : stream.infoHash ? "RESOLVER NEEDED" : "UNAVAILABLE"}</small></button>;
 }
 
 function matchingSeasonSource(streams: StreamSource[], reference: StreamSource) {
@@ -641,7 +646,7 @@ function formatDate(value: string) { const date = new Date(value); return Number
 function orderSeasons(values: number[]) { return values.sort((left, right) => left === right ? 0 : left === 0 ? 1 : right === 0 ? -1 : left - right); }
 function firstEpisode(videos: Video[]) { return [...videos].filter((video) => (video.season ?? 0) > 0 && video.available !== false).sort((left, right) => (left.season ?? 0) - (right.season ?? 0) || (left.episode ?? 0) - (right.episode ?? 0))[0]; }
 function firstLine(value?: string) { return value?.split(/\r?\n/).find((line) => line.trim())?.trim(); }
-function streamDetailLines(stream: StreamSource, heading: string) {
+function streamDetailLines(stream: StreamSource, heading: string, showFileSize = true) {
   let lines = [...new Set([stream.name, stream.description, stream.title]
     .flatMap((value) => (value || "").split(/\r?\n/))
     .map((line) => line.trim())
@@ -653,7 +658,7 @@ function streamDetailLines(stream: StreamSource, heading: string) {
     lines.unshift(`▰ ${filename}`);
   }
   lines = lines.filter((line, index, all) => all.findIndex((candidate) => normalizeStreamLine(candidate) === normalizeStreamLine(line)) === index);
-  if (stream.behaviorHints?.videoSize && !lines.some((line) => /\b(?:gb|mb)\b/i.test(line))) lines.push(`▣ ${formatBytes(stream.behaviorHints.videoSize)}`);
+  if (showFileSize && stream.behaviorHints?.videoSize && !lines.some((line) => /\b(?:gb|mb)\b/i.test(line))) lines.push(`▣ ${formatBytes(stream.behaviorHints.videoSize)}`);
   if (lines.length === 0) lines.push("No additional stream information");
   return lines;
 }
@@ -664,7 +669,7 @@ function normalizeStreamLine(value: string) {
     .trim()
     .toLowerCase();
 }
-function streamBadges(stream: StreamSource) {
+function streamBadges(stream: StreamSource, showFileSize = true) {
   const text = `${stream.name} ${stream.title} ${stream.description} ${stream.behaviorHints?.filename ?? ""}`;
   const rules: Array<[RegExp, string]> = [
     [/\b(2160p|4k)\b/i, "4K"], [/\b1080p\b/i, "1080p"], [/\b720p\b/i, "720p"],
@@ -675,7 +680,7 @@ function streamBadges(stream: StreamSource) {
   ];
   const badges = rules.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
   const size = stream.behaviorHints?.videoSize;
-  if (size && size > 0) badges.push(formatBytes(size));
+  if (showFileSize && size && size > 0) badges.push(formatBytes(size));
   return [...new Set(badges)].slice(0, 9);
 }
 function formatBytes(bytes: number) { const gb = bytes / 1_073_741_824; return gb >= 1 ? `${gb.toFixed(gb >= 10 ? 1 : 2)} GB` : `${(bytes / 1_048_576).toFixed(0)} MB`; }

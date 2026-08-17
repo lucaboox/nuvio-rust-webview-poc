@@ -1,9 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     io::Read,
     net::{IpAddr, ToSocketAddrs},
-    sync::OnceLock,
-    time::Duration,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -22,6 +23,8 @@ const HOME_CATALOG_LIMIT: usize = 24;
 const HOME_HERO_ITEM_LIMIT: usize = 8;
 const COLLECTION_CATALOG_LIMIT: usize = 60;
 const MAX_ADDON_JSON_BYTES: usize = 8 * 1024 * 1024;
+const METADATA_CACHE_MAX: usize = 256;
+const METADATA_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 /// Manifest and stream fetches are IO-bound, so the pool exists to bound
 /// sockets rather than CPU. Eight meant a long tail of addons waited behind
 /// four waves of the slowest one in each.
@@ -225,6 +228,10 @@ pub struct Video {
     pub season_poster: Option<String>,
     pub overview: Option<String>,
     pub runtime: Option<i64>,
+    /// Per-episode score. Addons spell this three different ways, so the
+    /// parser accepts all of them rather than only the one Cinemeta sends.
+    #[serde(default)]
+    pub imdb_rating: Option<String>,
     #[serde(default = "default_true")]
     pub available: bool,
 }
@@ -329,6 +336,8 @@ pub struct StreamSource {
     pub stream_type: Option<String>,
     #[serde(default, rename = "behaviorHints")]
     pub behavior_hints: StreamBehaviorHints,
+    #[serde(default, rename = "clientResolve")]
+    pub client_resolve: Option<StreamClientResolve>,
     #[serde(default)]
     pub addon_logo: Option<String>,
 }
@@ -348,6 +357,52 @@ pub struct StreamBehaviorHints {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamClientResolve {
+    #[serde(default, rename = "type")]
+    pub resolve_type: Option<String>,
+    pub info_hash: Option<String>,
+    pub file_idx: Option<i64>,
+    pub magnet_uri: Option<String>,
+    pub torrent_name: Option<String>,
+    pub filename: Option<String>,
+    pub service: Option<String>,
+    pub is_cached: Option<bool>,
+    pub stream: Option<StreamClientResolveStream>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamClientResolveStream {
+    pub raw: Option<StreamClientResolveRaw>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamClientResolveRaw {
+    pub torrent_name: Option<String>,
+    pub filename: Option<String>,
+    pub size: Option<i64>,
+    pub folder_size: Option<i64>,
+    pub parsed: Option<StreamClientResolveParsed>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamClientResolveParsed {
+    #[serde(default, rename = "raw_title")]
+    pub raw_title: Option<String>,
+    #[serde(default, rename = "parsed_title")]
+    pub parsed_title: Option<String>,
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub hdr: Vec<String>,
+    pub codec: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamProxyHeaders {
     #[serde(default)]
     pub request: std::collections::HashMap<String, String>,
@@ -360,6 +415,55 @@ pub struct ContentService {
     client: Client,
     manifests: Vec<InstalledManifest>,
     addon_signature: String,
+    /// Requests run on snapshots so the main content lock is never held while
+    /// an addon is on the network. An Arc keeps successful detail results
+    /// shared by those snapshots instead of throwing the cache away with each
+    /// worker clone.
+    metadata_cache: Arc<Mutex<HashMap<String, CachedMetadata>>>,
+}
+
+#[derive(Clone)]
+struct CachedMetadata {
+    loaded_at: Instant,
+    value: ContentMeta,
+}
+
+fn metadata_cache_key(
+    addons: &[AddonRow],
+    content_type: &str,
+    id: &str,
+    config: &crate::metadata::MetadataConfig,
+) -> String {
+    let mut revision = DefaultHasher::new();
+    for addon in addons {
+        addon.url.hash(&mut revision);
+        addon.enabled.hash(&mut revision);
+        addon.sort_order.hash(&mut revision);
+    }
+    config.tmdb.enabled.hash(&mut revision);
+    config.tmdb.api_key.hash(&mut revision);
+    config.tmdb.language.hash(&mut revision);
+    config.tmdb.use_trailers.hash(&mut revision);
+    config.tmdb.use_artwork.hash(&mut revision);
+    config.tmdb.use_basic_info.hash(&mut revision);
+    config.tmdb.use_details.hash(&mut revision);
+    config.tmdb.use_release_dates.hash(&mut revision);
+    config.tmdb.use_credits.hash(&mut revision);
+    config.tmdb.use_productions.hash(&mut revision);
+    config.tmdb.use_networks.hash(&mut revision);
+    config.tmdb.use_episodes.hash(&mut revision);
+    config.tmdb.use_season_posters.hash(&mut revision);
+    config.tmdb.use_more_like_this.hash(&mut revision);
+    config.tmdb.use_collections.hash(&mut revision);
+    config.mdblist.enabled.hash(&mut revision);
+    config.mdblist.api_key.hash(&mut revision);
+    config.mdblist.providers.hash(&mut revision);
+    format!(
+        "{}:{}:{:016x}",
+        content_type.trim().to_ascii_lowercase(),
+        id.trim(),
+        revision.finish()
+    )
 }
 
 impl Default for ContentService {
@@ -381,6 +485,7 @@ impl Default for ContentService {
                 .expect("valid content HTTP client"),
             manifests: Vec::new(),
             addon_signature: String::new(),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -389,6 +494,9 @@ impl ContentService {
     pub fn invalidate(&mut self) {
         self.manifests.clear();
         self.addon_signature.clear();
+        if let Ok(mut cache) = self.metadata_cache.lock() {
+            cache.clear();
+        }
     }
 
     pub fn snapshot(&mut self, addons: &[AddonRow]) -> Self {
@@ -407,12 +515,47 @@ impl ContentService {
         id: &str,
         config: &crate::metadata::MetadataConfig,
     ) -> Result<ContentMeta> {
+        let cache_key = metadata_cache_key(addons, content_type, id, config);
+        if let Some(value) = self.cached_metadata(&cache_key) {
+            return Ok(value);
+        }
         let lookup_id =
             crate::metadata::addon_lookup_id(&self.client, content_type, id, &config.tmdb);
-        match self.resolve_meta(addons, content_type, &lookup_id) {
+        let resolved = match self.resolve_meta(addons, content_type, &lookup_id) {
             Ok(meta) => Ok(crate::metadata::enrich_tmdb(&self.client, meta, config)),
             Err(_) => crate::metadata::standalone(&self.client, content_type, id, config),
+        }?;
+        self.cache_metadata(cache_key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn cached_metadata(&self, key: &str) -> Option<ContentMeta> {
+        let mut cache = self.metadata_cache.lock().ok()?;
+        let entry = cache.get(key)?;
+        if entry.loaded_at.elapsed() <= METADATA_CACHE_TTL {
+            return Some(entry.value.clone());
         }
+        cache.remove(key);
+        None
+    }
+
+    fn cache_metadata(&self, key: String, value: ContentMeta) {
+        let Ok(mut cache) = self.metadata_cache.lock() else {
+            return;
+        };
+        if cache.len() >= METADATA_CACHE_MAX {
+            cache.retain(|_, entry| entry.loaded_at.elapsed() <= METADATA_CACHE_TTL);
+            if cache.len() >= METADATA_CACHE_MAX {
+                cache.clear();
+            }
+        }
+        cache.insert(
+            key,
+            CachedMetadata {
+                loaded_at: Instant::now(),
+                value,
+            },
+        );
     }
 
     pub fn inspect_addon(&self, raw_url: &str) -> Result<(String, String)> {
@@ -1322,6 +1465,17 @@ fn parse_video(value: &Value) -> Option<Video> {
             .or_else(|| value_string(value, "season_poster_path")),
         overview: value_string(value, "overview").or_else(|| value_string(value, "description")),
         runtime: value_i64(value, "runtime"),
+        imdb_rating: value_string(value, "imdbRating")
+            .or_else(|| value_string(value, "imdb_rating"))
+            .or_else(|| value_string(value, "rating"))
+            .or_else(|| {
+                // Cinemeta sends it as a number, which value_string skips.
+                value
+                    .get("imdbRating")
+                    .or_else(|| value.get("rating"))
+                    .and_then(Value::as_f64)
+                    .map(|score| format!("{score:.1}"))
+            }),
         available: value
             .get("available")
             .and_then(Value::as_bool)
@@ -1566,7 +1720,10 @@ fn get_with_redirects(client: &Client, url: &str) -> Result<(String, reqwest::bl
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .with_context(|| {
-                format!("Addon returned HTTP {} with no location: {current}", response.status())
+                format!(
+                    "Addon returned HTTP {} with no location: {current}",
+                    response.status()
+                )
             })?;
         // A Location may be relative, and is resolved against the URL that
         // produced it rather than against the original.
@@ -1786,7 +1943,12 @@ mod tests {
     /// `composeApp/.../addons/AddonTransportUrls.kt`. It concatenates strings
     /// rather than going through a URL parser, so pinning against it catches
     /// anywhere the parser round-trip here changes a byte the addon will see.
-    fn nuvio_resource_url(manifest_url: &str, resource: &str, content_type: &str, id: &str) -> String {
+    fn nuvio_resource_url(
+        manifest_url: &str,
+        resource: &str,
+        content_type: &str,
+        id: &str,
+    ) -> String {
         let base = manifest_url
             .split('?')
             .next()
@@ -1803,11 +1965,7 @@ mod tests {
         )
     }
 
-    fn manifest_with(
-        types: &[&str],
-        id_prefixes: &[&str],
-        resources: Vec<Resource>,
-    ) -> Manifest {
+    fn manifest_with(types: &[&str], id_prefixes: &[&str], resources: Vec<Resource>) -> Manifest {
         Manifest {
             id: "example".to_string(),
             name: "Example".to_string(),
@@ -1845,11 +2003,7 @@ mod tests {
         assert!(!supports(&prefixed, "stream", "series", "kitsu:12345"));
 
         // The short form has always inherited; that must not regress.
-        let short = manifest_with(
-            &["movie"],
-            &[],
-            vec![Resource::Name("stream".to_string())],
-        );
+        let short = manifest_with(&["movie"], &[], vec![Resource::Name("stream".to_string())]);
         assert!(supports(&short, "stream", "movie", "tt0111161"));
         assert!(!supports(&short, "meta", "movie", "tt0111161"));
 
@@ -1863,8 +2017,18 @@ mod tests {
         // A series id, whose colons are the part addons are pickiest about, and
         // an AIOStreams-style manifest carrying its configuration in the path.
         let cases = [
-            ("https://example.com/a/manifest.json", "stream", "series", "tt0903747:1:1"),
-            ("https://example.com/a/manifest.json", "stream", "movie", "tt0111161"),
+            (
+                "https://example.com/a/manifest.json",
+                "stream",
+                "series",
+                "tt0903747:1:1",
+            ),
+            (
+                "https://example.com/a/manifest.json",
+                "stream",
+                "movie",
+                "tt0111161",
+            ),
             (
                 "https://aio.example.com/stremio/eyJhIjoxLCJiIjoiYy1kX2UifQ==/manifest.json",
                 "stream",
@@ -1877,7 +2041,12 @@ mod tests {
                 "movie",
                 "tt0111161",
             ),
-            ("https://example.com/a/manifest.json", "meta", "series", "kitsu:12345"),
+            (
+                "https://example.com/a/manifest.json",
+                "meta",
+                "series",
+                "kitsu:12345",
+            ),
         ];
         for (manifest, resource, content_type, id) in cases {
             assert_eq!(
@@ -1904,10 +2073,58 @@ mod tests {
     }
 
     #[test]
+    fn metadata_cache_is_scoped_to_addon_priority_and_enrichment_settings() {
+        let first = AddonRow {
+            url: "https://a.test/manifest.json".to_string(),
+            name: Some("A".to_string()),
+            enabled: true,
+            sort_order: 0,
+        };
+        let second = AddonRow {
+            url: "https://b.test/manifest.json".to_string(),
+            name: Some("B".to_string()),
+            enabled: true,
+            sort_order: 1,
+        };
+        let config = crate::metadata::MetadataConfig::default();
+        let base = metadata_cache_key(&[first.clone(), second.clone()], "series", "tt123", &config);
+        assert_ne!(
+            base,
+            metadata_cache_key(&[second, first], "series", "tt123", &config)
+        );
+
+        let mut enriched = config.clone();
+        enriched.tmdb.enabled = true;
+        assert_ne!(
+            base,
+            metadata_cache_key(
+                &[
+                    AddonRow {
+                        url: "https://a.test/manifest.json".to_string(),
+                        name: Some("A".to_string()),
+                        enabled: true,
+                        sort_order: 0,
+                    },
+                    AddonRow {
+                        url: "https://b.test/manifest.json".to_string(),
+                        name: Some("B".to_string()),
+                        enabled: true,
+                        sort_order: 1,
+                    },
+                ],
+                "series",
+                "tt123",
+                &enriched,
+            )
+        );
+    }
+
+    #[test]
     fn home_includes_catalogs_with_optional_search() {
         let service = ContentService {
             client: Client::new(),
             addon_signature: String::new(),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             manifests: vec![InstalledManifest {
                 url: "https://example.com/manifest.json".to_string(),
                 display_name: "Example".to_string(),
@@ -1964,6 +2181,7 @@ mod tests {
         let mut service = ContentService {
             client: Client::new(),
             addon_signature: "cached".to_string(),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             manifests: vec![
                 installed("https://a.test/manifest.json", "a", "1.0.0"),
                 installed("https://b.test/manifest.json", "b", "1.0.0"),
@@ -1998,6 +2216,7 @@ mod tests {
         let service = ContentService {
             client: Client::new(),
             addon_signature: String::new(),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             manifests: vec![installed("https://a.test/manifest.json", "a", "3.1.4")],
         };
         let reachable = service.describe(
