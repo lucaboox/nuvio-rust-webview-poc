@@ -1451,6 +1451,28 @@ fn parse_meta(value: &Value) -> Option<ContentMeta> {
     })
 }
 
+/// An episode's score, or nothing.
+///
+/// Cinemeta sends "0" for every episode it holds no rating for — all 32 of
+/// Reacher's, for one — so reading the field straight through labels a whole
+/// show "IMDb 0". Zero is absence here rather than a score, and an addon that
+/// sends nothing should look the same as one that sends zero.
+fn episode_rating(value: &Value) -> Option<String> {
+    let raw = value_string(value, "imdbRating")
+        .or_else(|| value_string(value, "imdb_rating"))
+        .or_else(|| value_string(value, "rating"))
+        .or_else(|| {
+            // Some addons send a number, which value_string skips.
+            value
+                .get("imdbRating")
+                .or_else(|| value.get("rating"))
+                .and_then(Value::as_f64)
+                .map(|score| format!("{score:.1}"))
+        })?;
+    let score: f64 = raw.trim().parse().ok()?;
+    (score > 0.0).then_some(raw)
+}
+
 fn parse_video(value: &Value) -> Option<Video> {
     Some(Video {
         id: value_string(value, "id")?,
@@ -1465,17 +1487,7 @@ fn parse_video(value: &Value) -> Option<Video> {
             .or_else(|| value_string(value, "season_poster_path")),
         overview: value_string(value, "overview").or_else(|| value_string(value, "description")),
         runtime: value_i64(value, "runtime"),
-        imdb_rating: value_string(value, "imdbRating")
-            .or_else(|| value_string(value, "imdb_rating"))
-            .or_else(|| value_string(value, "rating"))
-            .or_else(|| {
-                // Cinemeta sends it as a number, which value_string skips.
-                value
-                    .get("imdbRating")
-                    .or_else(|| value.get("rating"))
-                    .and_then(Value::as_f64)
-                    .map(|score| format!("{score:.1}"))
-            }),
+        imdb_rating: episode_rating(value),
         available: value
             .get("available")
             .and_then(Value::as_bool)
