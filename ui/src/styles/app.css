@@ -68,6 +68,7 @@ button { font: inherit; }
 .media-card { display: grid; flex: 0 0 var(--poster-w, 154px); width: var(--poster-w, 154px); min-width: 0; padding: 0; border: 0; color: inherit; background: none; cursor: pointer; text-align: left; }.media-card-landscape { flex-basis: calc(var(--poster-w, 154px) * 1.636); width: calc(var(--poster-w, 154px) * 1.636); }.media-card:hover .poster-art { transform: translateY(-4px); border-color: #68707b; box-shadow: 0 13px 28px #0009; }
 .poster-art { position: relative; aspect-ratio: 2/3; overflow: hidden; border: 1px solid #303640; border-radius: var(--poster-radius, 10px); background: radial-gradient(circle at 70% 20%, color-mix(in srgb, var(--card-a) 80%, white 10%) 0%, transparent 31%), linear-gradient(145deg, var(--card-a), var(--card-b)); transition: .18s ease; }
 .poster-art.real-poster { background-color: #282c32; background-position: center; background-size: cover; }
+.poster-image { display: block; width: 100%; height: 100%; object-fit: cover; }
 .media-card-square .poster-art { aspect-ratio: 1; }.media-card-landscape .poster-art { aspect-ratio: 1.77; }
 .poster-art::before { content: ""; position: absolute; inset: 0; background: linear-gradient(145deg, transparent 38%, #0009 100%), repeating-linear-gradient(55deg, transparent 0 30px, #ffffff08 31px 32px); }
 .poster-index { position: absolute; top: 12px; left: 12px; color: #ffffff6b; font-size: 9px; font-weight: 800; letter-spacing: .12em; }.poster-title { position: absolute; right: 13px; bottom: 21px; left: 13px; font-size: 15px; font-weight: 800; line-height: 1.05; text-transform: uppercase; }
@@ -174,9 +175,19 @@ button { font: inherit; }
 .addon-add:focus-within { border-color: #5b636d; }
 
 .addon-list { display: grid; gap: 9px; }
-.addon-card { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 15px; padding: 14px 16px; border: 1px solid #2f3339; border-radius: 12px; background: #272b31; transition: border-color .12s; }
+/* A stacked card rather than one wide row: identity and the enable switch on
+   top, the actions on their own line, then the status chips. The row layout put
+   seven controls in a strip beside the name, which read as a toolbar attached
+   to the title rather than as controls belonging to the card. */
+.addon-card { display: grid; gap: 13px; padding: 16px 18px; border: 1px solid #2f3339; border-radius: 14px; background: #272b31; transition: border-color .12s; }
+.addon-card-head { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 15px; }
+/* The actions sit on a rule of their own so the chips below read as a separate band. */
+.addon-actions { justify-content: center; padding-top: 12px; border-top: 1px solid #33383f; }
+.addon-resources { margin: 0; overflow: hidden; color: #68717c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.addon-badges em.good { color: #7fd6a2; }
 .addon-card:hover { border-color: #333b44; }
 .addon-card.is-disabled .addon-icon, .addon-card.is-disabled .addon-copy { opacity: .45; }
+.addon-card.is-disabled { background: #23262b; }
 /* No frame — most addon logos ship their own shape, and a box around them
    just fights it. The letter fallback stands on its own. */
 .addon-icon { display: grid; place-items: center; width: 52px; height: 52px; overflow: hidden; border: 0; border-radius: 11px; color: #8f97a1; background: none; font-size: 20px; font-weight: 800; }
@@ -199,7 +210,7 @@ button { font: inherit; }
 /* 1120px of shell plus the horizontal padding, so the heading lines up with
    the nav column rather than sitting off on its own. */
 .settings-page { max-width: 1204px; margin-inline: auto; padding: 45px 42px 65px; }.settings-error { margin: -12px 0 20px; }.settings-group { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 38px; padding: 32px 0; border-top: 1px solid #2d3137; }.settings-group > div:first-child h2 { margin: 0 0 8px; font-size: 18px; }.settings-group > div:first-child p { margin: 0; color: #78828d; font-size: 12px; line-height: 1.55; }.settings-list { overflow: hidden; border: 1px solid #2d333b; border-radius: 13px; background: #272b31; }.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 22px; min-height: 0; padding: 11px 16px; border-bottom: 1px solid #2e3238; }.setting-row:last-child { border-bottom: 0; }.setting-row > div:first-child { display: grid; gap: 5px; }.setting-row strong { font-size: 14px; }.setting-row span { color: #87919b; font-size: 11px; }.setting-row select, .number-input { min-width: 150px; padding: 10px 12px; border: 1px solid #363d46; border-radius: 8px; color: #d3d8dc; background: #2b2f35; font: inherit; font-size: 12px; }.number-input { min-width: 82px; width: 82px; }.setting-row select:disabled, .number-input:disabled { opacity: .5; }
-@media (max-width: 800px) { .settings-group { grid-template-columns: 1fr; gap: 12px; }.addon-card { grid-template-columns: 44px minmax(0, 1fr); }.addon-actions { grid-column: 1 / -1; flex-wrap: wrap; } }
+@media (max-width: 800px) { .settings-group { grid-template-columns: 1fr; gap: 12px; }.addon-card-head { grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; }.addon-actions { grid-column: 1 / -1; flex-wrap: wrap; } }
 .details-page { min-height: 100%; padding-bottom: 70px; background: #0a0e14; }.details-back { position: sticky; z-index: 7; top: 12px; margin: 16px 0 -54px 28px; padding: 10px 14px; border: 1px solid #ffffff25; border-radius: 9px; color: #e1e5e8; background: #0c1015d9; backdrop-filter: blur(14px); cursor: pointer; }.details-hero { min-height: 520px; background: radial-gradient(circle at 70% 30%, #33383f, #1d2127 62%); background-position: center; background-size: cover; }.details-hero-content { display: flex; align-items: flex-end; gap: 34px; min-height: 520px; padding: 115px 7% 55px; background: linear-gradient(0deg,#0a0e14 0%,transparent 42%); }.details-page-poster { flex: 0 0 auto; width: 190px; aspect-ratio: 2/3; object-fit: cover; border: 1px solid #4a525c; border-radius: 12px; box-shadow: 0 22px 55px #000c; }.details-page-copy { max-width: 720px; }.details-page-copy h1 { margin: 8px 0 12px; font-size: clamp(40px,5vw,68px); letter-spacing: -.055em; line-height: 1; }.details-logo { display: block; max-width: 390px; max-height: 125px; margin: 14px 0; object-fit: contain; object-position: left bottom; }.details-facts { display: flex; gap: 14px; color: #b8bec5; font-size: 13px; }.details-page-copy > p { max-width: 670px; color: #b4bac2; font-size: 14px; line-height: 1.7; }.details-source-button { margin-top: 18px; padding: 13px 21px; font-size: 13px; }.credits-strip { display: flex; gap: 50px; margin: 0 7%; padding: 25px 0; border-bottom: 1px solid #2e3238; }.credits-strip div { display: grid; gap: 5px; }.credits-strip span, .episodes-heading > div > span, .details-sources > div:first-child > span { color: #9ca3ad; font-size: 9px; font-weight: 800; letter-spacing: .14em; }.credits-strip strong { color: #bdc3ca; font-size: 12px; }.episodes-section, .details-sources { margin: 38px 7% 0; }.episodes-heading { display: flex; align-items: end; justify-content: space-between; gap: 25px; margin-bottom: 20px; }.episodes-heading h2, .details-sources h2 { margin: 5px 0 0; font-size: 24px; }.season-tabs { display: flex; gap: 7px; overflow-x: auto; }.season-tabs button { flex: 0 0 auto; padding: 9px 13px; border: 1px solid #333a43; border-radius: 8px; color: #9199a3; background: #272b31; cursor: pointer; }.season-tabs button.active { border-color: #7d8590; color: #e6e8eb; background: #31353b; }.episode-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(270px,1fr)); gap: 13px; }.episode-card { position: relative; display: grid; grid-template-columns: 125px 1fr; min-height: 82px; overflow: hidden; padding: 0; border: 1px solid #2c333b; border-radius: 10px; color: inherit; background: #272b31; text-align: left; cursor: pointer; }.episode-card:hover, .episode-card.selected { border-color: #6c747f; background: #292d33; }.episode-thumb { position: relative; width: 125px; height: 82px; flex-shrink: 0; overflow: hidden; }
 .episode-thumb { position: relative; width: 125px; height: 82px; flex-shrink: 0; overflow: hidden; }
 .episode-card img, .episode-placeholder { display: block; width: 100%; height: 100%; object-fit: cover; background: #2d3137; }
@@ -364,6 +375,7 @@ button { font: inherit; }
 .stream-card-copy { display: grid; min-width: 0; gap: 5px; }.stream-card-copy > strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.stream-card-copy > strong i { margin-right: 7px; color: #ffd044; font-style: normal; }.stream-description, .stream-filename { display: -webkit-box; overflow: hidden; color: #9ca1a7; font-size: 11px; line-height: 1.45; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }.stream-filename { color: #7f848b; -webkit-line-clamp: 1; }
 .stream-detail-lines { display: grid; gap: 3px; min-width: 0; }.stream-detail-lines span { color: #a4a8ae; font-size: 11px; line-height: 1.42; overflow-wrap: anywhere; white-space: normal; }
 .stream-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }.stream-badges span { padding: 2px 6px; border: 1px solid #d7d9dc; border-radius: 5px; color: #e5e6e8; background: #ffffff08; font-size: 9px; font-weight: 800; line-height: 1.1; }.nuvio-stream-card > small { align-self: start; color: #c7ccd2; font-size: 9px; font-weight: 800; }
+.stream-badges.is-top { margin: 0 0 7px; }
 .amoled .nuvio-source-picker { background: #0b0b0bf2; }.amoled .nuvio-source-picker .source-list .nuvio-stream-card { background: #ffffff0a; }
 
 /* The detail route owns its viewport: the left page and episode rail scroll independently. */
@@ -536,9 +548,10 @@ button { font: inherit; }
 
 /* Continue Watching has its own richer, landscape presentation. */
 .continue-watching-row { display: flex; gap: 15px; overflow-x: auto; padding: 7px 28px 18px; scrollbar-width: none; cursor: grab; user-select: none; }.continue-watching-row::-webkit-scrollbar { display: none; }.continue-watching-row:active { cursor: grabbing; }
-.continue-card { flex: 0 0 330px; width: 330px; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }.continue-card-art { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 14px; background: #2f3339 center/cover no-repeat; box-shadow: inset 0 0 0 1px #ffffff17,0 10px 28px #0005; transition: transform .18s,box-shadow .18s; }.continue-card-art::after { content: ""; position: absolute; inset: 30% 0 0; background: linear-gradient(180deg,transparent,#08090be8 78%,#08090bf5); }.continue-card:hover .continue-card-art { transform: translateY(-4px); box-shadow: inset 0 0 0 1px #ffffff28,0 17px 34px #0008; }
+.continue-card { flex: 0 0 330px; width: 330px; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; cursor: pointer; }.continue-card-art { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 14px; background: #2f3339; box-shadow: inset 0 0 0 1px #ffffff17,0 10px 28px #0005; transition: transform .18s,box-shadow .18s; }.continue-card-image { position: absolute; inset: 0; background-position: center; background-size: cover; transition: filter .16s ease,transform .16s ease; }.continue-card-image.is-blurred { filter: blur(18px); transform: scale(1.12); }.continue-card-art::after { content: ""; position: absolute; z-index: 1; inset: 30% 0 0; background: linear-gradient(180deg,transparent,#08090be8 78%,#08090bf5); }.continue-card:hover .continue-card-art { transform: translateY(-4px); box-shadow: inset 0 0 0 1px #ffffff28,0 17px 34px #0008; }
 .continue-card-badge { position: absolute; z-index: 3; top: 11px; right: 11px; padding: 6px 9px; border-radius: 13px; color: #fff; background: #080c12d9; font-size: 10px; font-weight: 800; box-shadow: 0 4px 13px #0008; }.continue-card-copy { position: absolute; z-index: 3; right: 15px; bottom: 15px; left: 15px; display: grid; gap: 3px; padding-bottom: 8px; }.continue-card-copy small { color: #eef0f2; font-size: 10px; font-weight: 700; }.continue-card-copy strong { overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }.continue-card-copy span { overflow: hidden; color: #b7bbc0; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.continue-card-progress { position: absolute; z-index: 4; right: 13px; bottom: 8px; left: 13px; height: 4px; overflow: hidden; border-radius: 2px; background: #ffffff35; }.continue-card-progress b { display: block; height: 100%; border-radius: inherit; background: #eee; }
-@media (min-width: 1600px) { .continue-card { flex-basis: 370px; width: 370px; } }
+.continue-card.style-wide { flex-basis: 470px; width: 470px; }.continue-card.style-wide .continue-card-art { aspect-ratio: 2.45 / 1; background: #15181c; }.continue-card.style-wide .continue-card-image { right: 55%; }.continue-card.style-wide .continue-card-art::after { inset: 0; background: linear-gradient(90deg,transparent 25%,#08090bf5 47%); }.continue-card.style-wide .continue-card-copy { top: 34px; right: 15px; bottom: auto; left: 48%; padding: 0; }.continue-card.style-poster { flex-basis: 180px; width: 180px; }.continue-card.style-poster .continue-card-art { aspect-ratio: 2 / 3; }.continue-card.style-poster .continue-card-art::after { inset: 58% 0 0; }.continue-card.style-poster .continue-card-copy { position: static; display: grid; gap: 2px; padding: 9px 3px 0; }.continue-card.style-poster .continue-card-copy small { color: #8e949c; }.continue-card.style-poster .continue-card-copy strong { font-size: 14px; }.continue-card.style-poster .continue-card-copy span { color: #8e949c; font-size: 10px; }
+@media (min-width: 1600px) { .continue-card.style-card { flex-basis: 370px; width: 370px; }.continue-card.style-wide { flex-basis: 500px; width: 500px; }.continue-card.style-poster { flex-basis: 195px; width: 195px; } }
 
 /* Home carousel follows Nuvio's full-bleed cinematic hero instead of the old POC card. */
 .home-hero { position: relative; isolation: isolate; width: 100%; min-height: clamp(500px,calc(100vh - 185px),720px); overflow: hidden; margin: 0 0 28px; background-color: #272b31; background-position: center 28%; background-repeat: no-repeat; background-size: cover; }
@@ -861,6 +874,9 @@ button { font: inherit; }
 .player-startup-pulse b { width: 7px; height: 7px; border-radius: 50%; background: #e6e9ed; animation: player-pulse 1.05s ease-in-out infinite; }
 .player-startup-pulse b:nth-child(2) { animation-delay: .16s; }
 .player-startup-pulse b:nth-child(3) { animation-delay: .32s; }
+.player-parental-guide { position: absolute; z-index: 6; top: 96px; left: 34px; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; color: #f4f5f6; background: #11151bd9; box-shadow: 0 10px 30px #0008; animation: player-panel-in .18s ease-out; }
+.player-parental-guide span { color: #aeb5bf; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.player-parental-guide strong { padding: 3px 8px; border: 1px solid #cad0d7; border-radius: 6px; font-size: 15px; }
 @keyframes player-pulse { 0%, 80%, 100% { opacity: .22; transform: scale(.78); } 40% { opacity: 1; transform: scale(1); } }
 
 /* Nothing behind the cover should peek through it. */
@@ -1088,3 +1104,58 @@ button { font: inherit; }
 .amoled .download-location-card { background: #0d0d0d; }
 .amoled .download-location-card input { border-color: #292929; background: #171717; }
 @media (max-width: 900px) { .download-settings { grid-template-columns: 1fr; }.download-location-card label > div { flex-direction: column; } }
+
+/* ---- Library release calendar ---------------------------------------- */
+.calendar-page { min-height: 100%; padding: 43px 38px 64px; }
+.calendar-page-title { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.calendar-page-title > div > span,.calendar-agenda header > span { color: #9da6b0; font-size: 8px; font-weight: 800; letter-spacing: .18em; }
+.calendar-page-title h1 { margin: 7px 0 5px; font-size: 31px; letter-spacing: -.04em; }
+.calendar-page-title p { margin: 0; color: #7d858f; font-size: 10px; }
+.calendar-sync { display: flex; align-items: center; gap: 9px; color: #939ba5; font-size: 9px; }
+.calendar-toolbar { display: grid; grid-template-columns: 42px minmax(180px,auto) 66px 42px; align-items: center; justify-content: start; gap: 8px; margin-bottom: 14px; }
+.calendar-toolbar button { display: grid; min-height: 38px; place-items: center; border: 1px solid #363d46; border-radius: 12px; color: #dfe3e7; background: #292e34; cursor: pointer; font-size: 23px; }
+.calendar-toolbar button:hover { border-color: #59616b; background: #343940; }
+.calendar-toolbar .calendar-today { padding: 0 15px; font-size: 9px; font-weight: 800; }
+.calendar-toolbar h2 { margin: 0 8px; font-size: 17px; }
+.calendar-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(285px,340px); align-items: start; gap: 16px; }
+.calendar-board,.calendar-agenda { overflow: hidden; border: 1px solid #303640; border-radius: 18px; background: #20242a; box-shadow: 0 18px 46px #0004; }
+.calendar-board.calendar-month-next { animation: calendar-month-in-next .24s cubic-bezier(.2,.75,.25,1); }
+.calendar-board.calendar-month-previous { animation: calendar-month-in-previous .24s cubic-bezier(.2,.75,.25,1); }
+.calendar-month-loading { display: grid; min-height: 430px; place-items: center; align-content: center; gap: 11px; color: #8c959f; font-size: 9px; }
+.calendar-month-loading .loading-spinner { width: 27px; height: 27px; }
+.calendar-weekdays,.calendar-grid { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); }
+.calendar-weekdays { border-bottom: 1px solid #303640; background: #272c32; }
+.calendar-weekdays span { padding: 12px 8px; color: #8d959e; font-size: 8px; font-weight: 800; text-align: center; text-transform: uppercase; }
+.calendar-cell { position: relative; display: flex; min-width: 0; min-height: 96px; flex-direction: column; gap: 7px; padding: 9px; overflow: hidden; border: 0; border-right: 1px solid #2d3239; border-bottom: 1px solid #2d3239; color: #8d949d; background: #1d2126; cursor: pointer; text-align: left; }
+.calendar-cell:nth-child(7n) { border-right: 0; }
+.calendar-cell.empty { cursor: default; background: #191d21; }
+.calendar-cell:not(.empty):hover { background: #292e34; }
+.calendar-cell.selected { z-index: 1; outline: 1px solid #cfd4da; outline-offset: -2px; background: #2b3036; }
+.calendar-cell.today .calendar-day-number { color: #171a1e; background: #e2e5e8; }
+.calendar-day-number { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; color: #b9c0c8; font-size: 9px; font-weight: 800; }
+.calendar-cell-releases { display: grid; min-width: 0; gap: 4px; }
+.calendar-cell-releases > span { overflow: hidden; padding: 4px 5px; border-radius: 5px; color: #dce0e4; background: #343a42; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.calendar-cell-releases small { color: #9ba3ac; font-size: 7px; }
+.calendar-dot { display: none; width: 5px; height: 5px; border-radius: 50%; background: #e3e6e9; }
+.calendar-agenda { position: sticky; top: 16px; }
+.calendar-agenda > header { padding: 20px 20px 16px; border-bottom: 1px solid #303640; background: #272c32; }
+.calendar-agenda h2 { margin: 6px 0 4px; font-size: 16px; line-height: 1.25; }
+.calendar-agenda header small { color: #777f89; font-size: 8px; }
+.calendar-agenda-list { display: grid; max-height: 570px; gap: 8px; overflow-y: auto; padding: 10px; }
+.calendar-agenda-list > button { display: grid; grid-template-columns: 86px minmax(0,1fr) 18px; align-items: center; gap: 11px; min-width: 0; padding: 7px; border: 1px solid transparent; border-radius: 12px; color: inherit; background: #292e34; cursor: pointer; text-align: left; }
+.calendar-agenda-list > button:hover { border-color: #505862; background: #30363d; }
+.calendar-release-art { width: 86px; aspect-ratio: 16/9; border-radius: 8px; background: #343a42 center/cover no-repeat; }
+.calendar-release-copy { display: grid; min-width: 0; gap: 3px; }
+.calendar-release-copy small { color: #8e98a2; font-size: 7px; font-weight: 800; letter-spacing: .11em; }
+.calendar-release-copy strong,.calendar-release-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calendar-release-copy strong { font-size: 10px; }
+.calendar-release-copy > span { color: #8a929c; font-size: 8px; }
+.calendar-open { color: #89919b; font-size: 19px; }
+.calendar-empty-day,.calendar-empty-library { display: grid; place-items: center; gap: 7px; min-height: 170px; padding: 24px; color: #adb4bc; text-align: center; }
+.calendar-empty-day span,.calendar-empty-library span { color: #737c86; font-size: 9px; }
+.calendar-empty-library { margin-top: 16px; border: 1px dashed #343a42; border-radius: 16px; background: #20242a; }
+@media (max-width: 1050px) { .calendar-layout { grid-template-columns: 1fr; }.calendar-agenda { position: static; }.calendar-agenda-list { max-height: none; grid-template-columns: repeat(auto-fit,minmax(275px,1fr)); } }
+@media (max-width: 700px) { .calendar-page { padding: 28px 16px 50px; }.calendar-page-title { align-items: start; flex-direction: column; }.calendar-toolbar { grid-template-columns: 38px minmax(0,1fr) 58px 38px; width: 100%; }.calendar-toolbar h2 { margin: 0; font-size: 15px; text-align: center; }.calendar-cell { min-height: 58px; padding: 6px 4px; align-items: center; }.calendar-cell-releases { display: none; }.calendar-cell.has-releases .calendar-dot { display: block; }.calendar-day-number { width: 23px; height: 23px; }.calendar-weekdays span { padding-inline: 2px; }.calendar-agenda-list { grid-template-columns: 1fr; }.calendar-agenda-list > button { grid-template-columns: 92px minmax(0,1fr) 16px; }.calendar-release-art { width: 92px; } }
+@keyframes calendar-month-in-next { from { opacity: .3; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes calendar-month-in-previous { from { opacity: .3; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
+@media (prefers-reduced-motion: reduce) { .calendar-board { animation: none !important; } }

@@ -1,9 +1,9 @@
 import {
-  Compass, Download, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
-  SlidersHorizontal, type LucideIcon,
+  CalendarDays, Compass, Download, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
+  Settings, SlidersHorizontal, type LucideIcon,
 } from "lucide-react";
 
-type IconName = "home" | "discover" | "library" | "downloads" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "check" | "video" | "episodes" | "sources" | "eye";
+type IconName = "home" | "discover" | "library" | "calendar" | "downloads" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "gear" | "check" | "video" | "episodes" | "sources" | "eye";
 
 /**
  * Icons sourced from Lucide, whose 24x24 / round-cap style this set already
@@ -16,9 +16,13 @@ const lucide: Partial<Record<IconName, LucideIcon>> = {
   home: House,
   discover: Compass,
   library: Library,
+  calendar: CalendarDays,
   downloads: Download,
   addons: Puzzle,
   settings: SlidersHorizontal,
+  // Distinct from `settings`, which is the sliders glyph used for the nav. A
+  // cog is what an addon's own configuration page is labelled with elsewhere.
+  gear: Settings,
   play: Play,
   pause: Pause,
 };
@@ -27,6 +31,7 @@ const paths: Record<IconName, React.ReactNode> = {
   home: <><path d="m3 10 9-7 9 7"/><path d="M5 9v11h14V9"/><path d="M9 20v-6h6v6"/></>,
   discover: <><circle cx="12" cy="12" r="9"/><path d="m16 8-2.4 5.6L8 16l2.4-5.6L16 8Z"/><circle cx="12" cy="12" r=".8" fill="currentColor" stroke="none"/></>,
   library: <><path d="M4 4.5v15"/><path d="M8.5 6.5v13"/><path d="M13 4.5v15"/><path d="m16.9 5.6 3.9 13.6"/></>,
+  calendar: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></>,
   downloads: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></>,
   collections: <><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1.5"/><rect x="3.5" y="14" width="7" height="6" rx="1.5"/><rect x="13.5" y="14" width="7" height="6" rx="1.5"/></>,
   addons: <path d="M6.5 6h3.3a2.2 2.2 0 1 1 4.4 0h3.3a1 1 0 0 1 1 1v3.3a2.2 2.2 0 1 0 0 4.4V18a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1v-3.3a2.2 2.2 0 1 0 0-4.4V7a1 1 0 0 1 1-1Z"/>,
@@ -54,6 +59,7 @@ const paths: Record<IconName, React.ReactNode> = {
   drag: <><path d="M4 8h16M4 12h16M4 16h16"/></>,
   trash: <><path d="M4 7h16"/><path d="M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Z"/><path d="M6.5 7v12.5a1.5 1.5 0 0 0 1.5 1.5h8a1.5 1.5 0 0 0 1.5-1.5V7"/><path d="M10.5 11v6M13.5 11v6"/></>,
   external: <><path d="M14 4h6v6"/><path d="m20 4-8.5 8.5"/><path d="M18 14.5V19a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 19V8a1.5 1.5 0 0 1 1.5-1.5H10"/></>,
+  gear: <><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.47 1Z"/></>,
   check: <path d="m5 12.5 4.5 4.5L19 7.5"/>,
   eye: <><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></>,
   episodes: <><rect x="3" y="4.5" width="13" height="10" rx="1.6"/><path d="M18.5 6.5v11.5a1.5 1.5 0 0 1-1.5 1.5H6"/><path d="M21 8.5v9"/></>,

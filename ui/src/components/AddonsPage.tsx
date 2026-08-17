@@ -170,6 +170,7 @@ export function AddonsPage({
                 }
                 key={addon.url}
               >
+                <header className="addon-card-head">
                 <div className="addon-icon">
                   {addon.logo ? (
                     <img src={addon.logo} alt="" />
@@ -187,24 +188,8 @@ export function AddonsPage({
                     )}
                   </div>
                   <span title={addon.url}>{host}</span>
-                  <div className="addon-badges">
-                    <em title={`${addon.catalogCount} home catalogs`}>
-                      {addon.catalogCount} catalog
-                      {addon.catalogCount === 1 ? "" : "s"}
-                    </em>
-                    {addon.resourceNames.slice(0, 3).map((resource) => (
-                      <em key={resource}>{resource}</em>
-                    ))}
-                    {!addon.enabled && <em className="muted">Disabled</em>}
-                    {addon.error && (
-                      <em className="bad" title={addon.error}>
-                        Unreachable
-                      </em>
-                    )}
-                  </div>
                 </div>
-                <div className="addon-actions">
-                  <label
+                <label
                     className="switch"
                     title={
                       addon.enabled ? "Disable this addon" : "Enable this addon"
@@ -224,6 +209,8 @@ export function AddonsPage({
                     />
                     <i />
                   </label>
+                </header>
+                <div className="addon-actions">
                   <button
                     className="icon-action"
                     title="Reload this addon's manifest"
@@ -238,7 +225,7 @@ export function AddonsPage({
                       title="Open this addon's configuration page"
                       onClick={() => configure(addon)}
                     >
-                      <Icon name="external" size={17} />
+                      <Icon name="gear" size={17} />
                     </button>
                   )}
                   <button
@@ -275,6 +262,30 @@ export function AddonsPage({
                     <Icon name="trash" size={17} />
                   </button>
                 </div>
+                <div className="addon-badges">
+                  <em className={addon.enabled ? "good" : "muted"}>
+                    {addon.enabled ? "Active" : "Disabled"}
+                  </em>
+                  <em title={`${addon.resourceNames.length} resources`}>
+                    {addon.resourceNames.length} resource
+                    {addon.resourceNames.length === 1 ? "" : "s"}
+                  </em>
+                  <em title={`${addon.catalogCount} home catalogs`}>
+                    {addon.catalogCount} catalog
+                    {addon.catalogCount === 1 ? "" : "s"}
+                  </em>
+                  {addon.configurable && <em>Configurable</em>}
+                  {addon.error && (
+                    <em className="bad" title={addon.error}>
+                      Unreachable
+                    </em>
+                  )}
+                </div>
+                {!!addon.resourceNames.length && (
+                  <p className="addon-resources" title={addon.url}>
+                    {addon.resourceNames.join(", ")}
+                  </p>
+                )}
               </article>
             );
           })}
