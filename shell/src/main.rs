@@ -9,6 +9,7 @@ mod home_layout;
 mod ipc;
 mod library;
 mod metadata;
+mod paths;
 mod player;
 mod progress;
 mod settings;

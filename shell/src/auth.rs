@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
+use crate::paths::app_data_dir;
 
 const CREDENTIAL_SERVICE: &str = "tv.nuvio.rust-webview-poc";
 const CREDENTIAL_USER: &str = "supabase-refresh-token";
@@ -131,15 +132,6 @@ fn normalize_backend_url(value: &str) -> Result<String> {
     let path = url.path().trim_end_matches('/').to_string();
     url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_string())
-}
-
-fn app_data_dir() -> PathBuf {
-    env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("XDG_DATA_HOME").map(PathBuf::from))
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(env::temp_dir)
-        .join("Nuvio")
 }
 
 fn custom_backend_path() -> PathBuf {

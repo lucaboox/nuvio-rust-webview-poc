@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Nuvio",
+  "productName": "Nuvio Rust",
   "version": "0.1.0-alpha.5",
-  "identifier": "com.nuvio.desktop",
+  "identifier": "tv.nuvio.rust-webview-poc",
   "build": {
     "frontendDist": "../ui/dist",
     "beforeBuildCommand": {
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Nuvio",
+        "title": "Nuvio Rust",
         "width": 1280,
         "height": 820,
         "minWidth": 840,

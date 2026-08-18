@@ -18,6 +18,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::skip_segments::SkipSegment;
+use crate::paths::app_data_dir;
 
 const MAX_ACTIVE_DOWNLOADS: usize = 2;
 
@@ -780,15 +781,6 @@ fn move_file(source: &Path, target: &Path) -> Result<()> {
         fs::remove_file(source)?;
     }
     Ok(())
-}
-
-fn app_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Nuvio")
 }
 
 fn default_download_root() -> PathBuf {
