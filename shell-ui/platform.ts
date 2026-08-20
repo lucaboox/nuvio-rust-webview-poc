@@ -29,6 +29,7 @@ import type {
   DownloadRequest,
   DownloadsSnapshot,
   Platform,
+  PlayerSource,
   RequestOptions,
   RequestResponse,
 } from "../shared-ui/src/platform/types.ts";
@@ -103,8 +104,27 @@ const auth = {
   onSessionLost: () => () => undefined,
 };
 
+/**
+ * libmpv, by way of the shell.
+ *
+ * `player.prepare` is what the old UI called to start a file, and it already
+ * refuses a `file:` URL that does not belong to a download — so offline
+ * playback reaches the one player that can open it without widening anything.
+ */
+const player = {
+  open: (source: PlayerSource) =>
+    invoke<unknown>("player.prepare", {
+      url: source.url,
+      mediaId: source.mediaId,
+      startPositionMs: source.startPositionMs ?? 0,
+      requestHeaders: source.requestHeaders ?? {},
+    }).then(() => undefined),
+  stop: () => invoke<unknown>("player.stop").then(() => undefined),
+};
+
 export const platform: Platform = {
   auth,
+  player,
   downloads,
   // Absent until the resolver is ported. The contract exists, the shell's
   // credentials do too, but nothing on either client turns a cached link into
