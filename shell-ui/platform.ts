@@ -11,7 +11,7 @@
  * dirty the submodule and lose the change on the next update.
  */
 
-import { invoke } from "../ui/src/bridge/nativeBridge";
+import { invoke } from "./bridge.ts";
 import {
   copyStreamUrl,
   externalPlayerLabel,
