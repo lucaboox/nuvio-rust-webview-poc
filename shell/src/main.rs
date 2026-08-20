@@ -15,8 +15,8 @@ mod progress;
 mod settings;
 mod skip_segments;
 mod thumbnail;
-mod watch_sync;
 mod updates;
+mod watch_sync;
 
 use std::sync::{Arc, Mutex};
 
@@ -153,28 +153,54 @@ fn main() {
             // (AppForegroundMonitor → requestForegroundPull), which is why a
             // change made elsewhere shows up there within a second or two of
             // switching to it. Regaining focus is the desktop equivalent.
+            //
+            // This callback runs on Tauri's window event loop. Never wait for
+            // AppState here: account restoration and profile refresh perform
+            // network work while holding that mutex. Waiting for it from a
+            // Focused event stalls Windows' non-client event processing too,
+            // which makes the title bar refuse to drag while the app loads.
             if matches!(event, WindowEvent::Focused(true)) {
-                if let Ok(mut state) = window.state::<SharedState>().lock() {
-                    // Expire the cache; the next read re-pulls.
-                    state.settings_loaded_at = None;
-                }
-                // The bridge only delivers events alongside a command
-                // response, so nudge the UI directly to re-read. `eval` lives
-                // on the webview rather than the window this closure receives.
-                if let Some(webview) = window.app_handle().get_webview_window("main") {
-                    let _ = webview.eval(
-                        "window.__NUVIO_BRIDGE_DELIVER__ && window.__NUVIO_BRIDGE_DELIVER__({event:'sync.foreground',payload:{}});",
-                    );
-                }
+                let shared = Arc::clone(window.state::<SharedState>().inner());
+                let app = window.app_handle().clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    if let Ok(mut state) = shared.lock() {
+                        // Expire the cache; the next read re-pulls.
+                        state.settings_loaded_at = None;
+                    }
+                    // The bridge only delivers events alongside a command
+                    // response, so nudge the UI directly to re-read after the
+                    // state is ready. `eval` lives on the webview rather than
+                    // the window this closure receives.
+                    if let Some(webview) = app.get_webview_window("main") {
+                        let _ = webview.eval(
+                            "window.__NUVIO_BRIDGE_DELIVER__ && window.__NUVIO_BRIDGE_DELIVER__({event:'sync.foreground',payload:{}});",
+                        );
+                    }
+                });
             }
             if matches!(event, WindowEvent::CloseRequested { .. }) {
-                // libmpv holds a child window and a decode thread; dropping the
-                // process without stopping it can wedge on exit.
+                // Never wait for account/bootstrap I/O from the Windows close
+                // callback. This callback is on the native event loop, so a
+                // blocking AppState lock made the title-bar X appear frozen
+                // until whichever Supabase/addon request held it completed.
+                //
+                // When the state is immediately available, hand libmpv cleanup
+                // to a detached worker as well: PlayerService::stop joins the
+                // decode thread and mpv_destroy may take a moment on a network
+                // stream, but neither operation is required before the window
+                // itself can disappear. Process teardown remains the fallback
+                // if a request currently owns AppState.
                 let state: State<'_, SharedState> = window.state();
-                if let Ok(state) = state.lock()
-                    && let Ok(mut player) = state.player.lock()
-                {
-                    player.stop();
+                if let Ok(state) = state.try_lock() {
+                    let player = Arc::clone(&state.player);
+                    drop(state);
+                    let _ = std::thread::Builder::new()
+                        .name("nuvio-player-shutdown".to_string())
+                        .spawn(move || {
+                            if let Ok(mut player) = player.lock() {
+                                player.stop();
+                            }
+                        });
                 }
             }
         })

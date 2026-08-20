@@ -2,8 +2,8 @@ use std::{
     env, fs,
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -134,6 +134,7 @@ fn normalize_backend_url(value: &str) -> Result<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+
 fn custom_backend_path() -> PathBuf {
     app_data_dir().join("backend.json")
 }
@@ -162,8 +163,83 @@ fn clear_custom_backend() -> Result<()> {
 
 #[derive(Clone, Debug)]
 struct Session {
-    access_token: String,
+    tokens: Arc<SessionTokens>,
     user: AuthUser,
+}
+
+#[derive(Debug)]
+struct SessionTokens {
+    access_token: RwLock<String>,
+    /// Serializes refreshes across every clone of an AuthService. Without this,
+    /// several requests that observe the same expired JWT can each rotate the
+    /// single-use Supabase refresh token and invalidate one another.
+    refresh_gate: Mutex<()>,
+    /// Stale AuthService clones can outlive sign-out or a backend switch (for
+    /// example, a player progress worker). Marking their shared session inactive
+    /// prevents them from refreshing or continuing to write after that point.
+    active: AtomicBool,
+}
+
+impl Session {
+    fn new(access_token: String, user: AuthUser) -> Self {
+        Self {
+            tokens: Arc::new(SessionTokens {
+                access_token: RwLock::new(access_token),
+                refresh_gate: Mutex::new(()),
+                active: AtomicBool::new(true),
+            }),
+            user,
+        }
+    }
+
+    fn access_token(&self) -> Result<String> {
+        if !self.tokens.active.load(Ordering::Acquire) {
+            bail!("The Nuvio session is no longer active. Sign in again.");
+        }
+        Ok(self
+            .tokens
+            .access_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone())
+    }
+
+    fn is_active(&self) -> bool {
+        self.tokens.active.load(Ordering::Acquire)
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.is_active()
+            && (self.user.is_anonymous
+                || !self
+                    .tokens
+                    .access_token
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty())
+    }
+
+    fn deactivate(&self) {
+        self.tokens.active.store(false, Ordering::Release);
+        self.tokens
+            .access_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    fn deactivate_and_wait_for_refresh(&self) {
+        self.deactivate();
+        // A refresh that was already in flight checks `active` before
+        // publishing its token. Waiting for its gate also guarantees callers
+        // can safely clear or replace the stored refresh credential afterward.
+        drop(
+            self.tokens
+                .refresh_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -314,7 +390,7 @@ impl AuthService {
             .map(|config| config.primary_url.clone());
         let official_backend_configured = BackendConfig::load_official().is_some();
         match &self.session {
-            Some(session) => AuthSnapshot {
+            Some(session) if session.is_authenticated() => AuthSnapshot {
                 status: "authenticated",
                 backend_configured: self.config.is_some(),
                 official_backend_configured,
@@ -325,7 +401,7 @@ impl AuthService {
                 email: session.user.email.clone(),
                 is_anonymous: session.user.is_anonymous,
             },
-            None => AuthSnapshot {
+            _ => AuthSnapshot {
                 status: "unauthenticated",
                 backend_configured: self.config.is_some(),
                 official_backend_configured,
@@ -374,7 +450,9 @@ impl AuthService {
             clear_custom_backend()?;
         }
         if changed {
-            self.session = None;
+            if let Some(session) = self.session.take() {
+                session.deactivate_and_wait_for_refresh();
+            }
             clear_refresh_token();
             // The remembered endpoint belonged to the old configuration.
             self.preferred_base.store(0, Ordering::Relaxed);
@@ -384,14 +462,17 @@ impl AuthService {
     }
 
     pub fn continue_anonymously(&mut self) -> AuthSnapshot {
-        self.session = Some(Session {
-            access_token: String::new(),
-            user: AuthUser {
+        if let Some(session) = self.session.take() {
+            session.deactivate_and_wait_for_refresh();
+        }
+        self.session = Some(Session::new(
+            String::new(),
+            AuthUser {
                 id: Uuid::new_v4().to_string(),
                 email: None,
                 is_anonymous: true,
             },
-        });
+        ));
         self.snapshot()
     }
 
@@ -469,19 +550,27 @@ impl AuthService {
     fn install_session(&mut self, payload: AuthTokenResponse) -> Result<bool> {
         match (payload.access_token, payload.refresh_token, payload.user) {
             (Some(access_token), Some(refresh_token), Some(user)) => {
-                self.session = Some(Session {
-                    access_token,
-                    user: AuthUser {
-                        id: user.id,
-                        email: user.email,
-                        is_anonymous: false,
-                    },
-                });
                 let config = self
                     .config
                     .as_ref()
                     .context("This build has no Nuvio backend configuration")?;
+                // Stop every clone of the previous session before rotating the
+                // process-wide saved credential. Otherwise an in-flight clone
+                // can overwrite the new refresh token after login completes.
+                if let Some(session) = self.session.take() {
+                    session.deactivate_and_wait_for_refresh();
+                }
+                // Persist first so a Credential Manager error never publishes
+                // a session that cannot survive an application restart.
                 save_refresh_token(config, &refresh_token)?;
+                self.session = Some(Session::new(
+                    access_token,
+                    AuthUser {
+                        id: user.id,
+                        email: user.email,
+                        is_anonymous: false,
+                    },
+                ));
                 Ok(true)
             }
             _ => Ok(false),
@@ -489,18 +578,26 @@ impl AuthService {
     }
 
     pub fn sign_out(&mut self) {
-        if let (Some(config), Some(session)) = (&self.config, &self.session)
-            && !session.user.is_anonymous
-            && !session.access_token.is_empty()
-        {
-            let _ = self
-                .client
-                .post(format!("{}/auth/v1/logout", config.primary_url))
-                .header("apikey", &config.anon_key)
-                .bearer_auth(&session.access_token)
-                .send();
+        if let Some(session) = self.session.take() {
+            let access_token = session.access_token().unwrap_or_default();
+            session.deactivate();
+            if let Some(config) = &self.config
+                && !session.user.is_anonymous
+                && !access_token.is_empty()
+            {
+                let _ = self
+                    .client
+                    .post(format!("{}/auth/v1/logout", config.primary_url))
+                    .header("apikey", &config.anon_key)
+                    .bearer_auth(access_token)
+                    .send();
+            }
+            // If a clone was already refreshing, let it finish before clearing
+            // the shared credential. Its post-request active check prevents it
+            // from publishing another access token, and this wait makes the
+            // credential deletion the final operation.
+            session.deactivate_and_wait_for_refresh();
         }
-        self.session = None;
         clear_refresh_token();
     }
 
@@ -663,6 +760,85 @@ impl AuthService {
         &self.sync_client_id
     }
 
+    fn refresh_after_unauthorized(
+        &self,
+        session: &Session,
+        rejected_access_token: &str,
+    ) -> Result<String> {
+        if session.user.is_anonymous {
+            bail!("Anonymous sessions cannot be refreshed");
+        }
+        let _refresh_guard = session
+            .tokens
+            .refresh_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !session.tokens.active.load(Ordering::Acquire) {
+            bail!("The Nuvio session is no longer active. Sign in again.");
+        }
+
+        // Another request may have completed the refresh while this one was
+        // waiting for the gate. Reuse its token instead of rotating again.
+        let current_access_token = session.access_token()?;
+        if current_access_token != rejected_access_token {
+            if current_access_token.is_empty() {
+                bail!("The Nuvio session has no access token. Sign in again.");
+            }
+            return Ok(current_access_token);
+        }
+
+        let config = self
+            .config
+            .as_ref()
+            .context("This build has no Nuvio backend configuration")?;
+        let Some(refresh_token) = load_refresh_token(config)? else {
+            session.deactivate();
+            bail!("The saved Nuvio session has expired. Sign in again.");
+        };
+        let response = self.send_with_fallback(config, |base_url| {
+            self.client
+                .post(format!("{base_url}/auth/v1/token?grant_type=refresh_token"))
+                .header("apikey", &config.anon_key)
+                .json(&json!({ "refresh_token": refresh_token }))
+                .send()
+        })?;
+        let status = response.status();
+        let payload = match decode_success::<AuthTokenResponse>(response) {
+            Ok(payload) => payload,
+            Err(error) if matches!(status.as_u16(), 400 | 401 | 403) => {
+                session.deactivate();
+                clear_refresh_token();
+                return Err(error).context("The saved Nuvio session has expired");
+            }
+            Err(error) => return Err(error).context("Could not refresh the Nuvio session"),
+        };
+        let access_token = payload
+            .access_token
+            .filter(|token| !token.trim().is_empty())
+            .context("The backend did not return a refreshed access token")?;
+        let refresh_token = payload
+            .refresh_token
+            .filter(|token| !token.trim().is_empty())
+            .context("The backend did not return a rotated refresh token")?;
+
+        // sign_out/configure_backend marks the shared state inactive before it
+        // waits for this gate. Never publish credentials after that point.
+        if !session.tokens.active.load(Ordering::Acquire) {
+            bail!("The Nuvio session is no longer active. Sign in again.");
+        }
+        save_refresh_token(config, &refresh_token)?;
+        let mut shared_access_token = session
+            .tokens
+            .access_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !session.tokens.active.load(Ordering::Acquire) {
+            bail!("The Nuvio session is no longer active. Sign in again.");
+        }
+        *shared_access_token = access_token.clone();
+        Ok(access_token)
+    }
+
     fn authorized_rpc(&self, function: &str, params: &Value) -> Result<Response> {
         let config = self
             .config
@@ -672,14 +848,25 @@ impl AuthService {
             .session
             .as_ref()
             .context("Sign in before changing synced Nuvio data")?;
-        self.send_with_fallback(config, |base_url| {
-            self.client
-                .post(format!("{base_url}/rest/v1/rpc/{function}"))
-                .header("apikey", &config.anon_key)
-                .bearer_auth(&session.access_token)
-                .json(params)
-                .send()
-        })
+        let send = |access_token: &str| {
+            self.send_with_fallback(config, |base_url| {
+                self.client
+                    .post(format!("{base_url}/rest/v1/rpc/{function}"))
+                    .header("apikey", &config.anon_key)
+                    .bearer_auth(access_token)
+                    .json(params)
+                    .send()
+            })
+        };
+        let access_token = session.access_token()?;
+        let response = send(&access_token)?;
+        if !should_refresh_authorized_request(response.status().as_u16(), session.user.is_anonymous)
+        {
+            return Ok(response);
+        }
+        drop(response);
+        let refreshed_access_token = self.refresh_after_unauthorized(session, &access_token)?;
+        send(&refreshed_access_token)
     }
 
     fn authorized_json<T, F>(&self, path: &str, request: F) -> Result<T>
@@ -695,14 +882,24 @@ impl AuthService {
             .session
             .as_ref()
             .context("Sign in before accessing Nuvio data")?;
-        let response = self.send_with_fallback(config, |base_url| {
-            request(
-                &self.client,
-                format!("{base_url}{path}"),
-                config,
-                &session.access_token,
-            )
-        })?;
+        let send = |access_token: &str| {
+            self.send_with_fallback(config, |base_url| {
+                request(
+                    &self.client,
+                    format!("{base_url}{path}"),
+                    config,
+                    access_token,
+                )
+            })
+        };
+        let access_token = session.access_token()?;
+        let mut response = send(&access_token)?;
+        if should_refresh_authorized_request(response.status().as_u16(), session.user.is_anonymous)
+        {
+            drop(response);
+            let refreshed_access_token = self.refresh_after_unauthorized(session, &access_token)?;
+            response = send(&refreshed_access_token)?;
+        }
         decode_success(response)
     }
 
@@ -785,6 +982,10 @@ fn clear_refresh_token() {
 
 fn is_origin_failure(status: u16) -> bool {
     matches!(status, 502..=504 | 520..=526)
+}
+
+fn should_refresh_authorized_request(status: u16, is_anonymous: bool) -> bool {
+    status == 401 && !is_anonymous
 }
 
 fn decode_success<T: DeserializeOwned>(response: Response) -> Result<T> {
@@ -872,5 +1073,53 @@ mod tests {
         );
         assert!(refresh_token_for_backend(&stored, &second).is_none());
         assert!(refresh_token_for_backend("legacy-token", &first).is_none());
+    }
+
+    #[test]
+    fn cloned_sessions_share_rotated_access_tokens() {
+        let session = Session::new(
+            "access-one".into(),
+            AuthUser {
+                id: "user-one".into(),
+                email: None,
+                is_anonymous: false,
+            },
+        );
+        let clone = session.clone();
+
+        *session
+            .tokens
+            .access_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "access-two".into();
+
+        assert_eq!(clone.access_token().unwrap(), "access-two");
+    }
+
+    #[test]
+    fn deactivating_a_session_invalidates_every_clone() {
+        let session = Session::new(
+            "access-one".into(),
+            AuthUser {
+                id: "user-one".into(),
+                email: None,
+                is_anonymous: false,
+            },
+        );
+        let clone = session.clone();
+
+        session.deactivate_and_wait_for_refresh();
+
+        assert!(clone.access_token().is_err());
+        assert!(!clone.is_authenticated());
+    }
+
+    #[test]
+    fn only_authenticated_http_401_responses_trigger_refresh() {
+        assert!(should_refresh_authorized_request(401, false));
+        assert!(!should_refresh_authorized_request(400, false));
+        assert!(!should_refresh_authorized_request(403, false));
+        assert!(!should_refresh_authorized_request(500, false));
+        assert!(!should_refresh_authorized_request(401, true));
     }
 }

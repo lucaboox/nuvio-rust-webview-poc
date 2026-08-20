@@ -76,6 +76,19 @@ export function selectAutoplayFallback(
   return candidates.find((stream) => regex.test(streamSearchText(stream))) ?? null;
 }
 
+/**
+ * Initial playback never inherits the previous episode's binge group. That
+ * group is only an input to PlayerPage's next-episode transition. In Manual
+ * mode this must therefore return null even when both binge-group preferences
+ * are enabled and a matching source exists.
+ */
+export function selectInitialAutoplay(
+  candidates: StreamSource[],
+  settings?: SettingsSnapshot | null,
+): StreamSource | null {
+  return selectAutoplayFallback(candidates, settings, false);
+}
+
 /** Wait only for the unspent part of Nuvio's selection window. */
 export async function waitForAutoplayWindow(
   startedAt: number,

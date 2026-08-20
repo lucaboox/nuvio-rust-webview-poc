@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke, onNativeEvent } from "../bridge/nativeBridge";
 import type {
   AccountPayload,
@@ -20,7 +20,6 @@ import type {
   StreamSource,
   Video,
 } from "../bridge/types";
-import { AddonsPage } from "../components/AddonsPage";
 import { AuthGate } from "../components/AuthGate";
 import { CatalogPage } from "../components/CatalogPage";
 import { DetailsPage } from "../components/DetailsOverlay";
@@ -30,11 +29,11 @@ import { MediaRow } from "../components/MediaRow";
 import { LibraryPage } from "../components/LibraryPage";
 import { SettingsPage } from "../components/SettingsPage";
 import { ProfileMenu } from "../components/ProfileMenu";
+import { ContinueWatchingRow } from "../components/ContinueWatchingRow";
 import {
   buildContinueWatching,
   continueWatchingCandidates,
-} from "../components/WatchStatus";
-import { ContinueWatchingRow } from "../components/ContinueWatchingRow";
+} from "../data/continueWatching";
 import {
   CollectionFolderPage,
   CollectionRows,
@@ -53,6 +52,7 @@ import { primeLibrary, resetLibraryCache } from "../data/libraryCache";
 import { DiscoverPage } from "../components/DiscoverPage";
 import { DownloadsPage } from "../components/DownloadsPage";
 import { PersonPage } from "../components/PersonPage";
+import { CalendarPage } from "../components/CalendarPage";
 import { clearRecentSearches, forgetSearch, readRecentSearches, rememberSearch } from "../data/recentSearches";
 import { saveBingeGroup } from "../data/bingeGroupCache";
 import { contentKey, saveStreamLink } from "../data/streamLinkCache";
@@ -61,8 +61,8 @@ const navItems = [
   ["Home", "home"],
   ["Discover", "discover"],
   ["Library", "library"],
+  ["Calendar", "calendar"],
   ["Downloads", "downloads"],
-  ["Addons", "addons"],
   ["Settings", "settings"],
 ] as const;
 const emptyAuth: AuthSnapshot = {
@@ -74,6 +74,12 @@ const emptyAuth: AuthSnapshot = {
   isAnonymous: false,
 };
 const emptyProgress: ProgressSnapshot = { entries: [], watchedItems: [] };
+// Keep the same generous history window as the web client. Metadata is
+// resolved in small batches below, so this is a display ceiling rather than a
+// startup fan-out.
+const CONTINUE_METADATA_LIMIT = 80;
+const CONTINUE_METADATA_BATCH_SIZE = 6;
+const CONTINUE_METADATA_CONCURRENCY = 4;
 
 export function App() {
   const [activeNav, setActiveNav] = useState("Home");
@@ -111,6 +117,7 @@ export function App() {
   const [progressLibrary, setProgressLibrary] = useState<ContentMeta[]>([]);
   const [progressMetadata, setProgressMetadata] = useState<ContentMeta[]>([]);
   const [progressRevision, setProgressRevision] = useState(0);
+  const [progressReady, setProgressReady] = useState(false);
   const [collections, setCollections] = useState<NuvioCollection[]>([]);
   const [availableCollectionCatalogs, setAvailableCollectionCatalogs] =
     useState<AvailableCollectionCatalog[]>([]);
@@ -124,6 +131,11 @@ export function App() {
   const [activePlayback, setActivePlayback] = useState<ActivePlayback | null>(
     null,
   );
+  const homeRequest = useRef(0);
+  const homeScope = useRef("");
+  const progressRequest = useRef(0);
+  const progressScope = useRef("");
+  const progressMetadataCache = useRef(new Map<string, ContentMeta>());
 
   const addonSignature = addons
     .map((addon) => `${addon.enabled}:${addon.url}`)
@@ -160,9 +172,11 @@ export function App() {
       invoke<SettingsSnapshot>("settings.load")
         .then((next) => setAppSettings(next ?? null))
         .catch(() => undefined);
-      invoke<ProgressSnapshot>("progress.snapshot")
-        .then(setProgress)
-        .catch(() => undefined);
+      // One revision runs the complete, bounded progress refresh below. The
+      // old window-focus listener and this event both pulled the same snapshot,
+      // then fanned out dozens of duplicate metadata requests while the user
+      // was trying to drag or interact with the newly focused window.
+      setProgressRevision((revision) => revision + 1);
     });
     const stopPlayer = onNativeEvent<{ state: string; detail: string }>(
       "player.stateChanged",
@@ -175,76 +189,150 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (auth.status !== "authenticated") return;
-    setHome(null);
+    if (auth.status !== "authenticated") {
+      homeRequest.current += 1;
+      homeScope.current = "";
+      setHome(null);
+      setContentBusy(false);
+      return;
+    }
+    const request = ++homeRequest.current;
+    const scope = `${activeProfileIndex}:${addonSignature}`;
+    if (homeScope.current !== scope) {
+      homeScope.current = scope;
+      setHome(null);
+    }
     setContentError(null);
     setContentBusy(true);
     invoke<HomePayload>("content.home")
       .then((payload) => {
+        if (request !== homeRequest.current) return;
         setHome(payload);
         if (payload.errors.length)
           setNotice(
             `${payload.errors.length} addon request${payload.errors.length === 1 ? "" : "s"} could not be loaded.`,
           );
       })
-      .catch((error: Error) => setContentError(error.message))
-      .finally(() => setContentBusy(false));
+      .catch((error: Error) => {
+        if (request === homeRequest.current) setContentError(error.message);
+      })
+      .finally(() => {
+        if (request === homeRequest.current) setContentBusy(false);
+      });
   }, [auth.status, activeProfileIndex, addonSignature, contentRevision]);
 
   useEffect(() => {
     if (auth.status !== "authenticated") {
+      progressRequest.current += 1;
+      progressScope.current = "";
+      progressMetadataCache.current.clear();
       setProgress(emptyProgress);
       setProgressLibrary([]);
       setProgressMetadata([]);
+      setProgressReady(false);
       resetLibraryCache();
       return;
     }
+    const request = ++progressRequest.current;
+    const scope = `${activeProfileIndex}:${addonSignature}`;
+    if (progressScope.current !== scope) {
+      progressScope.current = scope;
+      progressMetadataCache.current.clear();
+      setProgressReady(false);
+    }
+    let cancelled = false;
     Promise.all([
       invoke<ProgressSnapshot>("progress.snapshot"),
-      invoke<{ items: ContentMeta[] }>("library.list").catch(() => ({
-        items: [],
-      })),
+      invoke<{ items: ContentMeta[] }>("library.list").catch(() => ({ items: [] })),
     ])
       .then(async ([snapshot, library]) => {
+        primeLibrary(library.items as LibraryItem[]);
+        if (appSettings?.continueWatchingVisible === false) {
+          if (cancelled || request !== progressRequest.current) return;
+          setProgress(snapshot);
+          setProgressLibrary(library.items);
+          setProgressMetadata([]);
+          setProgressReady(true);
+          return;
+        }
+        // Publish the synced snapshot immediately. Catalog/library metadata is
+        // enough for an initial card, while canonical detail metadata fills in
+        // progressively below. This keeps first paint independent of a slow
+        // metadata addon and prevents startup I/O from delaying window input.
+        if (cancelled || request !== progressRequest.current) return;
         setProgress(snapshot);
         setProgressLibrary(library.items);
-        primeLibrary(library.items as LibraryItem[]);
-        // Only titles that could actually yield a card, newest first — a
-        // finished movie never can, and with a long history those were
-        // consuming the whole resolve budget.
-        const identities = continueWatchingCandidates(snapshot);
-        const resolved = await Promise.all(
-          identities
-            .slice(0, 80)
-            .map(({ id, type }) =>
-              invoke<ContentMeta>("content.resolveMeta", { id, type }).catch(
-                () => null,
-              ),
-            ),
+        setProgressMetadata([]);
+        setProgressReady(true);
+
+        const identities = continueWatchingCandidates(snapshot).slice(
+          0,
+          CONTINUE_METADATA_LIMIT,
         );
-        setProgressMetadata(
-          resolved.filter((item): item is ContentMeta => !!item),
-        );
+        const publishResolved = () => {
+          if (cancelled || request !== progressRequest.current) return false;
+          setProgressMetadata(
+            identities
+              .map(({ id, type }) =>
+                progressMetadataCache.current.get(`${type}:${id}`),
+              )
+              .filter((item): item is ContentMeta => !!item),
+          );
+          return true;
+        };
+
+        // Library rows can contain only the catalog-shaped title and artwork;
+        // treating those as complete was why watched series with no `videos`
+        // vanished and why stale artwork won forever. Resolve canonical
+        // details for every candidate. Rust's metadata cache makes repeats
+        // cheap and applies the same TMDB/addon enrichment as the detail page.
+        publishResolved();
+        for (
+          let cursor = 0;
+          cursor < identities.length;
+          cursor += CONTINUE_METADATA_BATCH_SIZE
+        ) {
+          const batch = identities.slice(
+            cursor,
+            cursor + CONTINUE_METADATA_BATCH_SIZE,
+          );
+          await mapConcurrent(
+            batch,
+            CONTINUE_METADATA_CONCURRENCY,
+            async ({ id, type }) => {
+              const key = `${type}:${id}`;
+              if (progressMetadataCache.current.has(key)) return;
+              const item = await invoke<ContentMeta>("content.details", {
+                id,
+                type,
+              }).catch(() => null);
+              if (item) progressMetadataCache.current.set(key, item);
+            },
+          );
+          if (!publishResolved()) return;
+          // Let WebView2 paint and process input between network batches.
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 16));
+        }
       })
       .catch(() => {
+        if (cancelled || request !== progressRequest.current) return;
         setProgress(emptyProgress);
         setProgressLibrary([]);
         setProgressMetadata([]);
+        setProgressReady(true);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [
     auth.status,
     activeProfileIndex,
     libraryRevision,
     contentRevision,
     progressRevision,
+    addonSignature,
+    appSettings?.continueWatchingVisible,
   ]);
-
-  useEffect(() => {
-    const refreshProgress = () =>
-      setProgressRevision((revision) => revision + 1);
-    window.addEventListener("focus", refreshProgress);
-    return () => window.removeEventListener("focus", refreshProgress);
-  }, []);
 
   useEffect(
     () =>
@@ -409,7 +497,6 @@ export function App() {
     }
   }
   async function preparePlayback(stream: StreamSource, context: PlayContext) {
-    setActivePlayback({ title: context.title, context, stream });
     if (!context.offline) {
       saveStreamLink(
         contentKey(
@@ -424,6 +511,15 @@ export function App() {
       saveBingeGroup(context.contentId, stream.behaviorHints?.bingeGroup);
     }
     try {
+      if (appSettings?.externalPlayerEnabled) {
+        const externalTarget = stream.externalUrl || stream.url;
+        if (!externalTarget)
+          throw new Error("This source did not provide a URL an external player can open.");
+        await invoke("player.openExternal", { url: externalTarget });
+        setPlayerStatus("Opened in the system default player");
+        return;
+      }
+      setActivePlayback({ title: context.title, context, stream });
       const result = await invoke<{ status: string }>("player.prepare", {
         mediaId: context.title,
         url: stream.url,
@@ -702,17 +798,14 @@ export function App() {
               <button onClick={() => setNotice(null)}>Dismiss</button>
             </div>
           )}
-          {activeNav === "Addons" ? (
-            <AddonsPage
-              addons={addons}
-              loading={accountBusy}
-              onAccount={applyAccount}
-              onRefresh={refreshAddons}
-            />
-          ) : activeNav === "Settings" ? (
+          {activeNav === "Settings" ? (
             <SettingsPage
               profileIndex={activeProfileIndex}
               settings={appSettings}
+              addons={addons}
+              addonsLoading={accountBusy}
+              onAddonsAccount={applyAccount}
+              onRefreshAddons={refreshAddons}
               collections={collections}
               availableCatalogs={availableCollectionCatalogs}
               collectionsLoading={collectionsBusy}
@@ -752,6 +845,13 @@ export function App() {
               progress={progress}
               onSelect={openDetails}
             />
+          ) : activeNav === "Calendar" ? (
+            <CalendarPage
+              items={progressLibrary}
+              ready={progressReady}
+              scope={`${activeProfileIndex}:${addonSignature}`}
+              onSelect={openDetails}
+            />
           ) : activeNav === "Downloads" ? (
             <DownloadsPage onPlay={preparePlayback} />
           ) : activeNav === "CollectionFolder" && collectionFolder ? (
@@ -786,9 +886,10 @@ export function App() {
               payload={home}
               collections={collections}
               progress={progress}
-              dismissedNextUp={appSettings?.dismissedNextUp ?? []}
+              settings={appSettings}
               progressLibrary={[...progressLibrary, ...progressMetadata]}
               busy={contentBusy}
+              progressReady={progressReady}
               error={contentError}
               addons={addons}
               onCollectionFolder={openCollectionFolder}
@@ -849,9 +950,10 @@ function ContentPage({
   payload,
   collections,
   progress,
-  dismissedNextUp,
+  settings,
   progressLibrary,
   busy,
+  progressReady,
   error,
   addons,
   onCollectionFolder,
@@ -862,9 +964,10 @@ function ContentPage({
   payload: HomePayload | null;
   collections: NuvioCollection[];
   progress: ProgressSnapshot;
-  dismissedNextUp: string[];
+  settings: SettingsSnapshot | null;
   progressLibrary: ContentMeta[];
   busy: boolean;
+  progressReady: boolean;
   error: string | null;
   addons: AddonRow[];
   onCollectionFolder(
@@ -875,7 +978,11 @@ function ContentPage({
   onContinue(item: ContentMeta): void;
   onSeeAll(section: CatalogSection): void;
 }) {
-  if (busy) return <LoadingRows label="Loading your addon catalogs…" />;
+  // Keep an already-rendered Home page mounted during background refreshes.
+  // Replacing a long page with the short skeleton clamps scrollTop, so when
+  // the refreshed catalogs returned the view appeared to jump upward.
+  if (!progressReady || (busy && !payload))
+    return <LoadingRows label="Loading your addon catalogs…" />;
   if (error) return <Empty title="Catalog loading failed" detail={error} />;
   if (!addons.some((addon) => addon.enabled))
     return (
@@ -897,16 +1004,11 @@ function ContentPage({
       ? [payload.hero]
       : [];
   const catalogItems = payload.sections.flatMap((section) => section.items);
-  const continuing = buildContinueWatching(progress, [
-    ...catalogItems,
-    ...progressLibrary,
-  ]).filter((card) => {
-    // Nuvio hides a next-up suggestion by the seed episode that produced it,
-    // so the key is built from the finished episode rather than the next one.
-    if (!card.nextUp) return true;
-    const key = `${card.item.id}|${card.seedSeason ?? -1}|${card.seedEpisode ?? -1}`;
-    return !dismissedNextUp.includes(key);
-  });
+  const continuing = buildContinueWatching(
+    progress,
+    [...catalogItems, ...progressLibrary],
+    settings,
+  );
 
   // Rows come back in the order the home organizer defines, with collections
   // interleaved between catalogs exactly as Nuvio renders them. If the layout
@@ -940,7 +1042,11 @@ function ContentPage({
     <>
       <HomeHero items={heroItems} onSelect={onSelect} />
       {continuing.length > 0 && (
-        <ContinueWatchingRow cards={continuing} onSelect={onContinue} />
+        <ContinueWatchingRow
+          cards={continuing}
+          settings={settings}
+          onSelect={onContinue}
+        />
       )}
       {orderedRows.map((row) => {
         if (row.isCollection) {
@@ -963,6 +1069,7 @@ function ContentPage({
             progress={progress}
             onSelect={onSelect}
             onSeeAll={onSeeAll}
+            showSubtitle={false}
           />
         ) : null;
       })}
@@ -1111,6 +1218,27 @@ function LoadingRows({ label }: { label: string }) {
     </div>
   );
 }
+
+async function mapConcurrent<Input, Output>(
+  items: Input[],
+  concurrency: number,
+  mapper: (item: Input, index: number) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, concurrency), items.length) },
+    async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await mapper(items[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 function Empty({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="feature-page">

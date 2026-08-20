@@ -8,11 +8,13 @@ export function AddonsPage({
   loading,
   onAccount,
   onRefresh,
+  embedded = false,
 }: {
   addons: AddonRow[];
   loading: boolean;
   onAccount(payload: AccountPayload): void;
   onRefresh(): void;
+  embedded?: boolean;
 }) {
   const [descriptors, setDescriptors] = useState<AddonDescriptor[]>([]);
   const [canEdit, setCanEdit] = useState(false);
@@ -87,7 +89,7 @@ export function AddonsPage({
   const enabledCount = descriptors.filter((addon) => addon.enabled).length;
 
   return (
-    <div className="feature-page addons-page">
+    <div className={`feature-page addons-page${embedded ? " embedded" : ""}`}>
       <div className="feature-title">
         <div>
           <span>STREMIO ADDONS</span>

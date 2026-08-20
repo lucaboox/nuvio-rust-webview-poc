@@ -1,8 +1,77 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
+    thread,
+};
 
 use crate::app_state::AppState;
+
+const SETTINGS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgressCheckpoint {
+    position_ms: i64,
+    duration_ms: i64,
+    reached_eof: bool,
+}
+
+/// Keep only the freshest queued position while a previous network push is in
+/// flight. EOF is sticky so even a defensive out-of-order enqueue can never
+/// turn a completed playback into an ordinary resume point.
+fn coalesce_progress_checkpoints(
+    receiver: &Receiver<ProgressCheckpoint>,
+    mut latest: ProgressCheckpoint,
+) -> ProgressCheckpoint {
+    while let Ok(next) = receiver.try_recv() {
+        let reached_eof = latest.reached_eof || next.reached_eof;
+        latest = ProgressCheckpoint {
+            reached_eof,
+            ..next
+        };
+    }
+    latest
+}
+
+fn spawn_progress_reporter(
+    auth: crate::auth::AuthService,
+    profile_id: i32,
+    identity: crate::progress::PlaybackIdentity,
+) -> Box<dyn Fn(i64, i64, bool) + Send + 'static> {
+    let (sender, receiver) = mpsc::channel::<ProgressCheckpoint>();
+    if let Err(error) = thread::Builder::new()
+        .name("nuvio-progress-sync".to_string())
+        .spawn(move || {
+            while let Ok(first) = receiver.recv() {
+                let checkpoint = coalesce_progress_checkpoints(&receiver, first);
+                if let Err(error) = crate::progress::push(
+                    &auth,
+                    profile_id,
+                    &identity,
+                    checkpoint.position_ms,
+                    checkpoint.duration_ms,
+                    checkpoint.reached_eof,
+                ) {
+                    eprintln!("watch progress push failed: {error:#}");
+                }
+            }
+        })
+    {
+        eprintln!("could not start watch progress worker: {error}");
+    }
+    Box::new(move |position_ms, duration_ms, reached_eof| {
+        // std::mpsc::Sender::send only appends to an in-memory queue; all HTTP
+        // and credential work remains on the named reporter thread.
+        let _ = sender.send(ProgressCheckpoint {
+            position_ms,
+            duration_ms,
+            reached_eof,
+        });
+    })
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RequestEnvelope {
@@ -275,15 +344,20 @@ pub fn handle_content_shared(
             .get("episode")
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let cached = shared_state.lock().ok().and_then(|state| {
-            state
+        let (cached, options) = {
+            let state = shared_state.lock().ok()?;
+            let cached = state
                 .downloads
                 .lock()
                 .ok()?
-                .cached_segments(content_id, video_id, season, episode)
-        });
+                .cached_segments(content_id, video_id, season, episode);
+            (cached, state.skip_options())
+        };
         let segments = cached.unwrap_or_else(|| {
-            crate::skip_segments::resolve(content_id, video_id, season, episode).unwrap_or_default()
+            crate::skip_segments::resolve_with_options(
+                content_id, video_id, season, episode, &options,
+            )
+            .unwrap_or_default()
         });
         return Some(vec![OutboundMessage::Response(success(
             request.id,
@@ -325,18 +399,45 @@ pub fn handle_content_shared(
     if !request.method.starts_with("content.") {
         return None;
     }
-    let (content, addons, metadata_config, home_layout) = {
-        let mut state = shared_state.lock().ok()?;
-        // The organizer is loaded here rather than at startup: it needs every
-        // addon manifest, and the home page is about to fetch those anyway.
-        state.ensure_home_layout();
+    let (mut content, mut addons, mut metadata_config, mut home_layout, layout_load) = {
+        let state = shared_state.lock().ok()?;
         (
             Arc::clone(&state.content),
             state.addons.clone(),
             state.metadata_config.clone(),
             state.home_layout.clone(),
+            if request.method == "content.home" {
+                state.pending_home_layout_load()
+            } else {
+                None
+            },
         )
     };
+    if let Some(layout_load) = layout_load {
+        // Manifest, collection, and organizer requests run without the global
+        // AppState mutex. Profile/settings/player IPC remains responsive while
+        // a slow addon or backend is loading the home page.
+        let started = std::time::Instant::now();
+        let plan = layout_load
+            .load()
+            .map(|layout| layout.plan())
+            .unwrap_or_default();
+        let elapsed_ms = started.elapsed().as_millis();
+
+        // Always take a fresh content snapshot after the remote work. If the
+        // captured profile/addon generation became stale, its plan is rejected
+        // and this response uses the current profile's inputs instead.
+        let mut state = shared_state.lock().ok()?;
+        let _ = state.commit_home_layout_load(&layout_load, plan, elapsed_ms);
+        content = Arc::clone(&state.content);
+        addons = state.addons.clone();
+        metadata_config = state.metadata_config.clone();
+        home_layout = if state.home_layout_stale {
+            Default::default()
+        } else {
+            state.home_layout.clone()
+        };
+    }
     let id = request.id.clone();
     if request.method == "content.enrichMeta" {
         let item =
@@ -598,9 +699,11 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                         state.addons.clear();
                         state.settings_snapshot = None;
                         state.settings_blob = None;
+                        state.provider_credentials = None;
                         state.metadata_config = Default::default();
                         state.content.lock().unwrap().invalidate();
-                        state.active_profile_index = 1;
+                        state.set_active_profile_index(1);
+                        state.invalidate_home_layout();
                         state.session_restore_attempted = true;
                         success(id, json!({ "auth": snapshot }))
                     }
@@ -657,9 +760,11 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             state.addons.clear();
             state.settings_snapshot = None;
             state.settings_blob = None;
+            state.provider_credentials = None;
             state.metadata_config = Default::default();
             state.content.lock().unwrap().invalidate();
-            state.active_profile_index = 1;
+            state.set_active_profile_index(1);
+            state.invalidate_home_layout();
             success(id, account_payload(state, None))
         }
         "profiles.select" => {
@@ -675,7 +780,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     .any(|profile| profile.profile_index == *profile_index)
             }) {
                 Some(profile_index) => {
-                    state.active_profile_index = profile_index;
+                    state.set_active_profile_index(profile_index);
                     match state.refresh_addons() {
                         Ok(()) => {
                             if let Err(error) = state.refresh_settings() {
@@ -885,7 +990,6 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             // it expires. Nuvio re-pulls on a 4-minute timer; opening the page
             // is a better moment for a desktop client, and the cache still
             // covers repeated visits.
-            const SETTINGS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
             let stale = state
                 .settings_loaded_at
                 .map(|at| at.elapsed() >= SETTINGS_MAX_AGE)
@@ -902,15 +1006,85 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             }
         }
         "settings.update" => {
+            let profile_index = profile_index_param(&request.params);
             let key = string_param(&request.params, "key");
             let value = request.params.get("value").cloned();
-            match (key, value) {
-                (Some(key), Some(value)) => {
-                    if state.settings_blob.is_none()
+            match (profile_index, key, value) {
+                (Some(profile_index), _, _) if profile_index != state.active_profile_index => {
+                    failure(
+                        id,
+                        "profile_changed",
+                        "The active profile changed before this setting could be saved".to_string(),
+                    )
+                }
+                (Some(_), Some(key), Some(value)) => {
+                    let stale = state
+                        .settings_loaded_at
+                        .map(|at| at.elapsed() >= SETTINGS_MAX_AGE)
+                        .unwrap_or(true);
+                    if (state.settings_blob.is_none() || stale)
                         && let Err(error) = state.refresh_settings()
                     {
                         failure(id, "settings_update_failed", error.to_string())
+                    } else if matches!(
+                        (key, value.as_bool()),
+                        ("tmdbEnabled" | "mdbListEnabled", Some(true))
+                    ) && !state
+                        .provider_credentials
+                        .as_ref()
+                        .is_some_and(|credentials| {
+                            credentials.has_api_key(if key == "tmdbEnabled" {
+                                "tmdb"
+                            } else {
+                                "mdblist"
+                            })
+                        })
+                    {
+                        failure(
+                            id,
+                            "settings_update_failed",
+                            "Save an API key before enabling this integration".to_string(),
+                        )
+                    } else if key == "debridEnabled"
+                        && value.as_bool() == Some(true)
+                        && !state
+                            .provider_credentials
+                            .as_ref()
+                            .is_some_and(|credentials| {
+                                !credentials
+                                    .configured_debrid_resolver_provider_ids()
+                                    .is_empty()
+                            })
+                    {
+                        failure(
+                            id,
+                            "settings_update_failed",
+                            "Connect Torbox or Premiumize before enabling Debrid".to_string(),
+                        )
                     } else {
+                        // Official Nuvio does not persist an unavailable preferred
+                        // resolver: it falls back to the first connected provider
+                        // in registry order (Torbox, then Premiumize).
+                        let value = if key == "debridPreferredResolverProviderId" {
+                            let requested = value.as_str().unwrap_or_default();
+                            let configured = state
+                                .provider_credentials
+                                .as_ref()
+                                .map(|credentials| {
+                                    credentials.configured_debrid_resolver_provider_ids()
+                                })
+                                .unwrap_or_default();
+                            json!(
+                                configured
+                                    .iter()
+                                    .copied()
+                                    .find(|provider| *provider == requested)
+                                    .or_else(|| configured.first().copied())
+                                    .unwrap_or_default()
+                            )
+                        } else {
+                            value
+                        };
                         let blob = state.settings_blob.clone().unwrap_or_else(|| json!({}));
                         match crate::settings::update_cached(
                             &state.auth,
@@ -922,7 +1096,13 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                             Ok((settings, blob)) => {
                                 state.settings_snapshot = Some(settings.clone());
                                 state.settings_blob = Some(blob);
+                                state.settings_loaded_at = Some(std::time::Instant::now());
                                 state.refresh_metadata();
+                                if key.starts_with("tmdb") || key.starts_with("mdbList") {
+                                    // Metadata enrichment is cached by content ID. A module
+                                    // change must not keep serving the pre-change response.
+                                    state.content.lock().unwrap().invalidate();
+                                }
                                 success(id, json!(settings))
                             }
                             Err(error) => failure(id, "settings_update_failed", error.to_string()),
@@ -933,6 +1113,191 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     id,
                     "invalid_params",
                     "Setting key and value are required".to_string(),
+                ),
+            }
+        }
+        "integrations.credentials" => {
+            if profile_index_param(&request.params) != Some(state.active_profile_index) {
+                failure(
+                    id,
+                    "profile_changed",
+                    "The active profile changed before credentials could be loaded".to_string(),
+                )
+            } else {
+                if state.provider_credentials.is_none() {
+                    match crate::settings::load_provider_credentials(
+                        &state.auth,
+                        state.active_profile_index,
+                    ) {
+                        Ok(credentials) => {
+                            state.provider_credentials = Some(credentials);
+                            state.refresh_metadata();
+                            // The settings blob may already enable a provider. If the
+                            // credential retry succeeds after content was fetched without it,
+                            // force that content to be enriched on its next request.
+                            state.content.lock().unwrap().invalidate();
+                        }
+                        Err(error) => {
+                            return vec![OutboundMessage::Response(failure(
+                                id,
+                                "integration_credentials_load_failed",
+                                error.to_string(),
+                            ))];
+                        }
+                    }
+                }
+                success(
+                    id,
+                    json!(
+                        state
+                            .provider_credentials
+                            .as_ref()
+                            .map(crate::settings::ProviderCredentialStore::snapshot)
+                    ),
+                )
+            }
+        }
+        "integrations.updateCredential" => {
+            let profile_index = profile_index_param(&request.params);
+            let provider = string_param(&request.params, "provider");
+            // Empty is meaningful here: it clears the credential. Do not use
+            // `string_param`, which deliberately rejects empty strings.
+            let credential = request
+                .params
+                .get("value")
+                .or_else(|| request.params.get("apiKey"))
+                .and_then(Value::as_str);
+            match (profile_index, provider, credential) {
+                (Some(profile_index), _, _) if profile_index != state.active_profile_index => {
+                    failure(
+                        id,
+                        "profile_changed",
+                        "The active profile changed before this credential could be saved"
+                            .to_string(),
+                    )
+                }
+                (
+                    Some(_),
+                    Some(
+                        provider @ ("tmdb" | "mdblist" | "animeskip" | "introdb" | "debrid:torbox"
+                        | "debrid:premiumize" | "debrid:realdebrid"),
+                    ),
+                    Some(credential),
+                ) => {
+                    let stale = state
+                        .settings_loaded_at
+                        .map(|at| at.elapsed() >= SETTINGS_MAX_AGE)
+                        .unwrap_or(true);
+                    if (state.settings_blob.is_none() || stale)
+                        && let Err(error) = state.refresh_settings()
+                    {
+                        return vec![OutboundMessage::Response(failure(
+                            id,
+                            "integration_credential_update_failed",
+                            error.to_string(),
+                        ))];
+                    }
+                    let mut settings_error = None;
+                    if credential.trim().is_empty() && matches!(provider, "tmdb" | "mdblist") {
+                        let enabled_key = if provider == "tmdb" {
+                            "tmdbEnabled"
+                        } else {
+                            "mdbListEnabled"
+                        };
+                        let was_enabled =
+                            state.settings_snapshot.as_ref().is_some_and(|settings| {
+                                if provider == "tmdb" {
+                                    settings.tmdb_enabled
+                                } else {
+                                    settings.mdb_list_enabled
+                                }
+                            });
+                        if was_enabled {
+                            let blob = state.settings_blob.clone().unwrap_or_else(|| json!({}));
+                            match crate::settings::update_cached(
+                                &state.auth,
+                                state.active_profile_index,
+                                &blob,
+                                enabled_key,
+                                json!(false),
+                            ) {
+                                Ok((settings, blob)) => {
+                                    state.settings_snapshot = Some(settings);
+                                    state.settings_blob = Some(blob);
+                                    state.settings_loaded_at = Some(std::time::Instant::now());
+                                    state.refresh_metadata();
+                                    state.content.lock().unwrap().invalidate();
+                                }
+                                Err(error) => settings_error = Some(error),
+                            }
+                        }
+                    }
+
+                    if let Some(error) = settings_error {
+                        failure(
+                            id,
+                            "integration_credential_update_failed",
+                            error.to_string(),
+                        )
+                    } else {
+                        match crate::settings::update_provider_credential(
+                            &state.auth,
+                            state.active_profile_index,
+                            provider,
+                            credential,
+                        ) {
+                            Ok(credentials) => {
+                                let snapshot = credentials.snapshot();
+                                state.provider_credentials = Some(credentials);
+                                if provider.starts_with("debrid:") {
+                                    let blob =
+                                        state.settings_blob.clone().unwrap_or_else(|| json!({}));
+                                    let credentials = state.provider_credentials.as_ref().unwrap();
+                                    match crate::settings::normalize_debrid_settings_for_credentials(
+                                        &state.auth,
+                                        state.active_profile_index,
+                                        &blob,
+                                        credentials,
+                                    ) {
+                                        Ok((settings, blob)) => {
+                                            state.settings_snapshot = Some(settings);
+                                            state.settings_blob = Some(blob);
+                                            state.settings_loaded_at =
+                                                Some(std::time::Instant::now());
+                                        }
+                                        Err(error) => {
+                                            return vec![OutboundMessage::Response(failure(
+                                                id,
+                                                "integration_credential_update_failed",
+                                                error.to_string(),
+                                            ))];
+                                        }
+                                    }
+                                }
+                                state.refresh_metadata();
+                                if matches!(provider, "tmdb" | "mdblist") {
+                                    state.content.lock().unwrap().invalidate();
+                                }
+                                success(
+                                    id,
+                                    json!({
+                                        "credentials": snapshot,
+                                        "settings": state.settings_snapshot,
+                                    }),
+                                )
+                            }
+                            Err(error) => failure(
+                                id,
+                                "integration_credential_update_failed",
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                }
+                _ => failure(
+                    id,
+                    "invalid_params",
+                    "A supported provider and credential value are required".to_string(),
                 ),
             }
         }
@@ -990,7 +1355,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         }
         "homeLayout.list" => match state.load_home_layout() {
             Ok(layout) => {
-                state.home_layout = layout.plan();
+                state.replace_home_layout(layout.plan());
                 success(id, json!(layout.ui_state()))
             }
             Err(error) => failure(id, "home_layout_load_failed", error.to_string()),
@@ -1049,7 +1414,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                         mutation,
                     ) {
                         Ok(layout) => {
-                            state.home_layout = layout.plan();
+                            state.replace_home_layout(layout.plan());
                             success(id, json!(layout.ui_state()))
                         }
                         Err(error) => failure(id, "home_layout_update_failed", error.to_string()),
@@ -1288,6 +1653,37 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 "Only HTTP(S) links can be opened".to_string(),
             ),
         },
+        "player.openExternal" => {
+            let raw = string_param(&request.params, "url");
+            let parsed = raw.and_then(|value| url::Url::parse(value).ok());
+            let allowed = parsed.as_ref().is_some_and(|url| match url.scheme() {
+                "http" | "https" => {
+                    url.host().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && crate::content::validate_addon_url(url).is_ok()
+                }
+                "file" => url.to_file_path().ok().is_some_and(|path| {
+                    path.is_file()
+                        && state
+                            .downloads
+                            .lock()
+                            .is_ok_and(|downloads| downloads.contains_play_url(url.as_str()))
+                }),
+                _ => false,
+            });
+            match (parsed, allowed) {
+                (Some(url), true) => match open::that_detached(url.as_str()) {
+                    Ok(()) => success(id, json!({ "opened": true })),
+                    Err(error) => failure(id, "open_failed", error.to_string()),
+                },
+                _ => failure(
+                    id,
+                    "invalid_params",
+                    "The external player URL is not a permitted stream or download".to_string(),
+                ),
+            }
+        }
         "content.home" => {
             let addons = state.addons.clone();
             let plan = state.home_layout.clone();
@@ -1479,6 +1875,12 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     let rtx_super_resolution = player_settings
                         .as_ref()
                         .is_some_and(|snapshot| snapshot.rtx_super_resolution);
+                    let resize_mode = player_settings
+                        .as_ref()
+                        .map(|snapshot| {
+                            crate::player::ResizeMode::from_setting(&snapshot.resize_mode)
+                        })
+                        .unwrap_or_default();
                     // Starting a title you had dismissed brings its suggestions
                     // back, the way Nuvio clears the keys when progress is
                     // recorded. Best effort: a failure here must not stop
@@ -1506,21 +1908,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                                 request_headers,
                                 start_position_ms,
                                 subtitle_style,
+                                resize_mode,
                                 rtx_super_resolution,
-                                // Fires once, as the playback loop tears down. Progress mid-episode
-                                // is not checkpointed, so a crash loses the session.
-                                Box::new(move |position, duration, reached_eof| {
-                                    if let Err(error) = crate::progress::push(
-                                        &auth,
-                                        profile_id,
-                                        &identity,
-                                        position,
-                                        duration,
-                                        reached_eof,
-                                    ) {
-                                        eprintln!("watch progress push failed: {error:#}");
-                                    }
-                                }),
+                                spawn_progress_reporter(auth, profile_id, identity),
                             )
                         }) {
                         Ok(status) => success(id, json!({ "status": status })),
@@ -1661,6 +2051,14 @@ fn string_param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+fn profile_index_param(params: &Value) -> Option<i32> {
+    params
+        .get("profileIndex")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
 fn credentials(params: &Value) -> anyhow::Result<(&str, &str)> {
     let email = params
         .get("email")
@@ -1741,6 +2139,22 @@ mod tests {
     }
 
     #[test]
+    fn delayed_setting_write_cannot_cross_profiles() {
+        let mut state = AppState::default();
+        state.active_profile_index = 1;
+        let messages = handle(
+            r#"{"id":"settings","method":"settings.update","params":{"profileIndex":2,"key":"amoledEnabled","value":true}}"#,
+            &mut state,
+        );
+        let OutboundMessage::Response(response) = &messages[0] else {
+            panic!("expected response")
+        };
+
+        assert!(!response.ok);
+        assert_eq!(response.error.as_ref().unwrap().code, "profile_changed");
+    }
+
+    #[test]
     fn player_headers_reject_transport_overrides_and_injection() {
         assert!(
             player_request_headers(&json!({ "requestHeaders": { "Host": "internal" } })).is_err()
@@ -1766,5 +2180,39 @@ mod tests {
                 .iter()
                 .any(|header| header == "Authorization: Bearer example")
         );
+    }
+
+    #[test]
+    fn progress_worker_coalesces_to_latest_and_keeps_eof_sticky() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(ProgressCheckpoint {
+                position_ms: 2_000,
+                duration_ms: 10_000,
+                reached_eof: false,
+            })
+            .unwrap();
+        sender
+            .send(ProgressCheckpoint {
+                position_ms: 10_000,
+                duration_ms: 10_000,
+                reached_eof: true,
+            })
+            .unwrap();
+        // This should never occur in the native player, but validates that a
+        // late ordinary sample cannot erase the final EOF marker.
+        sender
+            .send(ProgressCheckpoint {
+                position_ms: 9_500,
+                duration_ms: 10_000,
+                reached_eof: false,
+            })
+            .unwrap();
+
+        let first = receiver.recv().unwrap();
+        let latest = coalesce_progress_checkpoints(&receiver, first);
+        assert_eq!(latest.position_ms, 9_500);
+        assert_eq!(latest.duration_ms, 10_000);
+        assert!(latest.reached_eof);
     }
 }

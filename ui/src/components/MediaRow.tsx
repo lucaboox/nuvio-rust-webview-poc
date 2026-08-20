@@ -3,7 +3,7 @@ import type { CatalogSection, ContentMeta, ProgressSnapshot } from "../bridge/ty
 import { WatchStatus, watchStateForContent } from "./WatchStatus";
 import { showTitleContextMenu } from "./TitleContextMenu";
 
-export function MediaRow({ section, progress, onSelect, onSeeAll }: { section: CatalogSection; progress: ProgressSnapshot; onSelect(item: ContentMeta): void; onSeeAll?(section: CatalogSection): void }) {
+export function MediaRow({ section, progress, onSelect, onSeeAll, showSubtitle = true }: { section: CatalogSection; progress: ProgressSnapshot; onSelect(item: ContentMeta): void; onSeeAll?(section: CatalogSection): void; showSubtitle?: boolean }) {
   const rowRef = useRef<HTMLDivElement>(null);
   const drag = useRef({ active: false, moved: false, startX: 0, startScroll: 0 });
 
@@ -29,12 +29,15 @@ export function MediaRow({ section, progress, onSelect, onSeeAll }: { section: C
   }
 
   return <section className="media-section">
-    <div className="section-heading"><div><h2>{section.title}</h2>{section.subtitle && <p>{section.subtitle}</p>}</div>{onSeeAll && <button className="text-button" onClick={() => onSeeAll(section)}>See all</button>}</div>
+    <div className="section-heading"><div><h2>{section.title}</h2>{showSubtitle && section.subtitle && <p>{section.subtitle}</p>}</div>{onSeeAll && <button className="text-button" onClick={() => onSeeAll(section)}>See all</button>}</div>
     <div ref={rowRef} className="media-row drag-scroll" onPointerDown={beginDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerLeave={endDrag} onPointerCancel={endDrag} onDragStart={(event) => event.preventDefault()}>
       {section.items.map((item) => {
         const shape = normalizedShape(item.posterShape);
         return <button className={`media-card media-card-${shape}`} key={`${item.sourceManifestUrl}:${item.id}`} onClick={() => select(item)} onContextMenu={(event) => showTitleContextMenu(event, item)}>
-          <div className="poster-art real-poster" style={item.poster ? { backgroundImage: `url("${item.poster.replaceAll('"', '%22')}")` } : undefined}>{!item.poster && <span className="poster-title">{item.name}</span>}<WatchStatus state={watchStateForContent(item, progress)} /></div>
+          <div className={`poster-art${item.poster ? " real-poster" : ""}`}>
+            {item.poster ? <img className="poster-image" src={item.poster} alt="" loading="lazy" decoding="async" draggable={false} /> : <span className="poster-title">{item.name}</span>}
+            <WatchStatus state={watchStateForContent(item, progress)} />
+          </div>
           <span className="card-title">{item.name}</span>
           <span className="card-meta">{item.releaseInfo || item.contentType}</span>
         </button>;

@@ -8,13 +8,14 @@ use url::Url;
 
 use crate::content::{ContentMeta, ExternalRating, MetaPerson, MetaTrailer};
 
-#[derive(Clone, Debug, Default)]
+// Do not derive `Debug`: both nested settings carry provider API keys.
+#[derive(Clone, Default)]
 pub struct MetadataConfig {
     pub tmdb: TmdbMetadataSettings,
     pub mdblist: MdbListMetadataSettings,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TmdbMetadataSettings {
     pub enabled: bool,
     pub api_key: String,
@@ -25,8 +26,12 @@ pub struct TmdbMetadataSettings {
     pub use_details: bool,
     pub use_release_dates: bool,
     pub use_credits: bool,
+    pub use_productions: bool,
+    pub use_networks: bool,
     pub use_episodes: bool,
     pub use_season_posters: bool,
+    pub use_more_like_this: bool,
+    pub use_collections: bool,
 }
 
 impl Default for TmdbMetadataSettings {
@@ -41,13 +46,17 @@ impl Default for TmdbMetadataSettings {
             use_details: true,
             use_release_dates: false,
             use_credits: true,
+            use_productions: true,
+            use_networks: true,
             use_episodes: true,
             use_season_posters: true,
+            use_more_like_this: true,
+            use_collections: true,
         }
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MdbListMetadataSettings {
     pub enabled: bool,
     pub api_key: String,

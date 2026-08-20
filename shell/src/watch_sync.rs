@@ -34,11 +34,7 @@ struct Cache {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    Some(
-        dirs_next()?
-            .join("nuvio-rust-poc")
-            .join("watch-sync.json"),
-    )
+    Some(dirs_next()?.join("nuvio-rust-poc").join("watch-sync.json"))
 }
 
 /// `%LOCALAPPDATA%` on Windows, `~/.local/share` elsewhere.
@@ -51,7 +47,9 @@ fn dirs_next() -> Option<PathBuf> {
     {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
     }
 }
 

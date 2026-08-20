@@ -2,12 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "../bridge/nativeBridge";
 import type {
   AvailableCollectionCatalog,
+  AccountPayload,
+  AddonRow,
   CollectionCatalogSource,
   CollectionFolder,
+  IntegrationCredentials,
   NuvioCollection,
   SettingsSnapshot,
 } from "../bridge/types";
 import { CollectionSettingsSection } from "./CollectionsPage";
+import { AddonsPage } from "./AddonsPage";
 import { HomeLayoutSection } from "./HomeLayoutPage";
 import { UpdatesSection } from "./UpdatesSection";
 import { DownloadSettingsSection } from "./DownloadSettingsSection";
@@ -20,6 +24,10 @@ import {
   type SettingDef,
   type SettingScope,
 } from "../data/settingsRegistry";
+import {
+  INTEGRATION_CREDENTIAL_KEY,
+  normalizeIntegrationCredential,
+} from "../data/integrationSettings";
 
 const SCOPE_NOTE: Record<SettingScope, string> = {
   account: "Shared with every device on this profile — phone, TV and desktop.",
@@ -27,6 +35,8 @@ const SCOPE_NOTE: Record<SettingScope, string> = {
     "Stored per platform. Nuvio keeps separate desktop and mobile settings, so these do not reach your phone or TV.",
   local:
     "Not synced anywhere. These exist only in this client and are stored on this machine.",
+  mixed:
+    "Feature choices use Nuvio's desktop settings; credentials sync securely across this profile.",
 };
 
 const PUSH_DEBOUNCE_MS = 500;
@@ -34,6 +44,10 @@ const PUSH_DEBOUNCE_MS = 500;
 export function SettingsPage({
   profileIndex,
   settings,
+  addons,
+  addonsLoading,
+  onAddonsAccount,
+  onRefreshAddons,
   collections,
   availableCatalogs,
   collectionsLoading,
@@ -48,6 +62,10 @@ export function SettingsPage({
 }: {
   profileIndex: number;
   settings: SettingsSnapshot | null;
+  addons: AddonRow[];
+  addonsLoading: boolean;
+  onAddonsAccount(payload: AccountPayload): void;
+  onRefreshAddons(): void;
   collections: NuvioCollection[];
   availableCatalogs: AvailableCollectionCatalog[];
   collectionsLoading: boolean;
@@ -76,10 +94,14 @@ export function SettingsPage({
   // Values changed locally but not yet confirmed by the server.
   const [pending, setPending] = useState<Record<string, unknown>>({});
   const pushTimers = useRef<Record<string, number>>({});
+  const currentProfileRef = useRef(profileIndex);
+  const credentialOperationRef = useRef(0);
   useEffect(
     () => () => {
       for (const timer of Object.values(pushTimers.current))
         window.clearTimeout(timer);
+      pushTimers.current = {};
+      credentialOperationRef.current += 1;
     },
     [],
   );
@@ -87,11 +109,59 @@ export function SettingsPage({
   const [sectionId, setSectionId] = useState<string>(SECTIONS[0].id);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState<string | null>(null);
+  const [integrationCredentials, setIntegrationCredentials] =
+    useState<IntegrationCredentials | null>(null);
+  const [credentialsLoading, setCredentialsLoading] = useState(true);
+  const [credentialBusy, setCredentialBusy] = useState<string | null>(null);
   const client = useClientSettings();
   const paneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // A delayed whole-blob write must never follow the user onto a different
+    // profile. Cancel the old profile's timers; every request also carries its
+    // captured profile so the backend can reject an already-running race.
+    for (const timer of Object.values(pushTimers.current))
+      window.clearTimeout(timer);
+    pushTimers.current = {};
+    currentProfileRef.current = profileIndex;
+    credentialOperationRef.current += 1;
+    setPending({});
+    setCredentialBusy(null);
     setError(null);
+  }, [profileIndex]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIntegrationCredentials(null);
+    setCredentialsLoading(true);
+    invoke<IntegrationCredentials | null>("integrations.credentials", {
+      profileIndex,
+    })
+      .then((credentials) => {
+        if (!cancelled) {
+          setIntegrationCredentials(
+            credentials ?? {
+              tmdbApiKey: "",
+              mdbListApiKey: "",
+              animeSkipClientId: "",
+              introDbApiKey: "",
+              torboxApiKey: "",
+              premiumizeApiKey: "",
+              realDebridApiKey: "",
+            },
+          );
+        }
+      })
+      .catch((reason: Error) => {
+        if (!cancelled)
+          setError(reason.message || "Integration credentials could not be loaded");
+      })
+      .finally(() => {
+        if (!cancelled) setCredentialsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [profileIndex]);
 
   // Highlighting is a one-shot cue after jumping from a search result, so it
@@ -117,14 +187,20 @@ export function SettingsPage({
    * request.
    */
   function updateSynced(key: string, value: unknown) {
+    const targetProfileIndex = profileIndex;
     setError(null);
     setPending((current) => ({ ...current, [key]: value }));
     const timers = pushTimers.current;
     if (timers[key]) window.clearTimeout(timers[key]);
     timers[key] = window.setTimeout(() => {
       delete timers[key];
-      invoke<SettingsSnapshot>("settings.update", { key, value })
+      invoke<SettingsSnapshot>("settings.update", {
+        profileIndex: targetProfileIndex,
+        key,
+        value,
+      })
         .then((next) => {
+          if (currentProfileRef.current !== targetProfileIndex) return;
           onSettingsChange?.(next);
           // Drop the optimistic value only once the server agrees, so the
           // control never flickers back to the old one in between.
@@ -134,6 +210,7 @@ export function SettingsPage({
           });
         })
         .catch((reason: Error) => {
+          if (currentProfileRef.current !== targetProfileIndex) return;
           setError(reason.message || "Setting update failed");
           setPending((current) => {
             const { [key]: _failed, ...rest } = current;
@@ -157,23 +234,97 @@ export function SettingsPage({
 
   const section = SECTIONS.find((item) => item.id === sectionId) ?? SECTIONS[0];
 
-  const readValue = (setting: SettingDef, scope: SettingScope): unknown =>
-    scope !== "local" && setting.id in pending
-      ? pending[String(setting.id)]
-      :
-    scope === "local"
-      ? client[setting.id as keyof ClientSettings]
-      : settings[setting.id as keyof SettingsSnapshot];
+  const readSyncedValue = (key: keyof SettingsSnapshot): unknown =>
+    key in pending ? pending[String(key)] : settings[key];
 
-  const isVisible = (setting: SettingDef, scope: SettingScope) => {
+  const readDependency = (
+    key: keyof SettingsSnapshot | keyof ClientSettings,
+  ): unknown =>
+    Object.prototype.hasOwnProperty.call(client, key)
+      ? client[key as keyof ClientSettings]
+      : readSyncedValue(key as keyof SettingsSnapshot);
+
+  const readValue = (setting: SettingDef, scope: SettingScope): unknown => {
+    if (setting.control.kind === "credential") {
+      return (
+        integrationCredentials?.[
+          INTEGRATION_CREDENTIAL_KEY[setting.control.provider]
+        ] ?? ""
+      );
+    }
+    return scope === "local" || setting.local
+      ? client[setting.id as keyof ClientSettings]
+      : readSyncedValue(setting.id as keyof SettingsSnapshot);
+  };
+
+  const isVisible = (setting: SettingDef) => {
     if (!setting.requires) return true;
-    return scope === "local"
-      ? !!client[setting.requires as keyof ClientSettings]
-      : !!settings[setting.requires as keyof SettingsSnapshot];
+    return !!readDependency(setting.requires);
+  };
+
+  const isBusy = (setting: SettingDef) => {
+    if (setting.control.kind === "credential")
+      return credentialsLoading || credentialBusy === String(setting.id);
+    if (setting.requiresCredential) {
+      if (credentialBusy) return true;
+      if (credentialsLoading || !integrationCredentials) return true;
+      if (!integrationCredentials[setting.requiresCredential]) return true;
+    }
+    if (setting.requiresAnyCredential) {
+      if (credentialBusy) return true;
+      if (credentialsLoading || !integrationCredentials) return true;
+      if (
+        !setting.requiresAnyCredential.some(
+          (key) => !!integrationCredentials[key],
+        )
+      )
+        return true;
+    }
+    return setting.enabledWhen
+      ? !readSyncedValue(setting.enabledWhen)
+      : false;
   };
 
   const commit = (setting: SettingDef, scope: SettingScope, value: unknown) => {
-    if (scope === "local") {
+    if (setting.control.kind === "credential") {
+      const provider = setting.control.provider;
+      const credential = normalizeIntegrationCredential(value);
+      const targetProfileIndex = profileIndex;
+      const operation = ++credentialOperationRef.current;
+      setError(null);
+      setCredentialBusy(String(setting.id));
+      invoke<{
+        credentials: IntegrationCredentials;
+        settings: SettingsSnapshot;
+      }>("integrations.updateCredential", {
+        profileIndex: targetProfileIndex,
+        provider,
+        value: credential,
+      })
+        .then((result) => {
+          if (
+            credentialOperationRef.current !== operation ||
+            currentProfileRef.current !== targetProfileIndex
+          )
+            return;
+          setIntegrationCredentials(result.credentials);
+          onSettingsChange?.(result.settings);
+        })
+        .catch((reason: Error) => {
+          if (
+            credentialOperationRef.current !== operation ||
+            currentProfileRef.current !== targetProfileIndex
+          )
+            return;
+          setError(reason.message || "Integration credential update failed");
+        })
+        .finally(() => {
+          if (credentialOperationRef.current === operation)
+            setCredentialBusy(null);
+        });
+      return;
+    }
+    if (scope === "local" || setting.local) {
       setClientSetting(setting.id as keyof ClientSettings, value as never);
       return;
     }
@@ -233,7 +384,9 @@ export function SettingsPage({
                     title={
                       item.scope === "local"
                         ? "Not synced — this machine only"
-                        : "Desktop only — not shared with your phone or TV"
+                        : item.scope === "mixed"
+                          ? "Uses both profile credentials and desktop preferences"
+                          : "Desktop only — not shared with your phone or TV"
                     }
                   />
                 )}
@@ -284,6 +437,14 @@ export function SettingsPage({
               profileIndex={profileIndex}
               onChanged={onHomeLayoutChanged}
             />
+          ) : section.custom === "addons" ? (
+            <AddonsPage
+              addons={addons}
+              loading={addonsLoading}
+              onAccount={onAddonsAccount}
+              onRefresh={onRefreshAddons}
+              embedded
+            />
           ) : section.custom === "collections" ? (
             <CollectionSettingsSection
               collections={collections}
@@ -309,13 +470,13 @@ export function SettingsPage({
                 </div>
                 <div className="settings-list">
                   {group.settings
-                    .filter((setting) => isVisible(setting, section.scope))
+                    .filter((setting) => isVisible(setting))
                     .map((setting) => (
                       <SettingRow
                         key={String(setting.id)}
                         setting={setting}
                         value={readValue(setting, section.scope)}
-                        busy={false}
+                        busy={isBusy(setting)}
                         highlighted={highlight === String(setting.id)}
                         onChange={(value) => commit(setting, section.scope, value)}
                       />
@@ -431,6 +592,16 @@ function SettingRow({
           value={String(value ?? "")}
           placeholder={control.placeholder}
           secret={control.secret}
+          disabled={busy}
+          onCommit={onChange}
+        />
+      )}
+
+      {control.kind === "credential" && (
+        <SettingTextField
+          value={String(value ?? "")}
+          placeholder={control.placeholder}
+          secret
           disabled={busy}
           onCommit={onChange}
         />

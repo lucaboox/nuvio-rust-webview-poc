@@ -1,6 +1,10 @@
 import type { SettingsSnapshot } from "../bridge/types";
 import type { ClientSettings } from "./clientSettings";
 import { POSTER_RADII, POSTER_WIDTHS } from "./posterSize";
+import type {
+  IntegrationCredentialKey,
+  IntegrationProvider,
+} from "./integrationSettings";
 
 /**
  * Every setting declared once, so the page layout and the search index cannot
@@ -8,18 +12,19 @@ import { POSTER_RADII, POSTER_WIDTHS } from "./posterSize";
  * grouping by what you are changing — and making them searchable — is the whole
  * point of this file.
  */
-export type SettingScope = "account" | "device" | "local";
+export type SettingScope = "account" | "device" | "local" | "mixed";
 
 export type SettingControl =
   | { kind: "switch" }
   | { kind: "preset"; options: readonly (readonly [string, string | number])[] }
   | { kind: "number"; min: number; max: number; step?: number; suffix?: string }
   | { kind: "text"; placeholder?: string; secret?: boolean }
+  | { kind: "credential"; provider: IntegrationProvider; placeholder?: string }
   | { kind: "color" };
 
 export type SettingDef = {
   /** Key on SettingsSnapshot, or on ClientSettings when scope is "local". */
-  id: keyof SettingsSnapshot | keyof ClientSettings;
+  id: keyof SettingsSnapshot | keyof ClientSettings | IntegrationCredentialKey;
   label: string;
   detail?: string;
   /** Extra words that should match in search but do not belong in the label. */
@@ -27,6 +32,14 @@ export type SettingDef = {
   control: SettingControl;
   /** Hide unless another setting is on — keeps dependent options out of the way. */
   requires?: keyof SettingsSnapshot | keyof ClientSettings;
+  /** This individual value is device-local even when shown in a synced section. */
+  local?: boolean;
+  /** Keep visible but disabled until this synced feature switch is enabled. */
+  enabledWhen?: keyof SettingsSnapshot;
+  /** Keep visible but disabled until the provider has a saved credential. */
+  requiresCredential?: IntegrationCredentialKey;
+  /** Keep visible but disabled until at least one listed provider is connected. */
+  requiresAnyCredential?: readonly IntegrationCredentialKey[];
 };
 
 export type SettingGroup = {
@@ -43,7 +56,7 @@ export type SettingSection = {
   subtitle: string;
   groups: SettingGroup[];
   /** Sections whose body is a bespoke component rather than a control list. */
-  custom?: "homeLayout" | "collections" | "downloads" | "updates";
+  custom?: "homeLayout" | "addons" | "collections" | "downloads" | "updates";
 };
 
 // Nuvio's AvailableLanguageOptions, verbatim — same codes, same English
@@ -162,6 +175,115 @@ export const SECTIONS: SettingSection[] = [
     groups: [],
   },
   {
+    id: "addons",
+    label: "Addons",
+    icon: "addons",
+    scope: "account",
+    subtitle: "Manage the Stremio addons used for catalogs, metadata and streams.",
+    custom: "addons",
+    groups: [],
+  },
+  {
+    id: "continueWatching",
+    label: "Continue Watching",
+    icon: "play",
+    scope: "account",
+    subtitle: "Resume and Next Up behavior synced with Nuvio.",
+    groups: [
+      {
+        title: "Visibility",
+        subtitle: "Control the shelf shown below the Home hero.",
+        settings: [
+          {
+            id: "continueWatchingVisible",
+            label: "Show Continue Watching",
+            detail: "Display the Continue Watching shelf on the Home screen",
+            control: { kind: "switch" },
+          },
+        ],
+      },
+      {
+        title: "Card style",
+        subtitle: "Choose the same three layouts offered by Nuvio.",
+        settings: [
+          {
+            id: "continueWatchingStyle",
+            label: "Layout",
+            detail: "Card is TV-style, Wide is info-dense, and Poster emphasizes artwork",
+            keywords: "landscape horizontal poster shelf",
+            control: {
+              kind: "preset",
+              options: [
+                ["Card", "Card"],
+                ["Wide", "Wide"],
+                ["Poster", "Poster"],
+              ],
+            },
+          },
+          {
+            id: "continueWatchingUseEpisodeThumbnails",
+            label: "Prefer episode thumbnails",
+            detail: "Use an episode image when one is available",
+            control: { kind: "switch" },
+          },
+          {
+            id: "continueWatchingBlurNextUp",
+            label: "Blur unwatched thumbnails",
+            detail: "Blur Next Up episode images to avoid spoilers",
+            requires: "continueWatchingUseEpisodeThumbnails",
+            control: { kind: "switch" },
+          },
+        ],
+      },
+      {
+        title: "Next Up behavior",
+        subtitle: "How completed episodes produce the next suggestion.",
+        settings: [
+          {
+            id: "continueWatchingUpNextFromFurthestEpisode",
+            label: "Next Up from furthest episode",
+            detail: "Disable during rewatches to use the most recently watched episode instead",
+            keywords: "rewatch latest completed season episode",
+            control: { kind: "switch" },
+          },
+          {
+            id: "continueWatchingShowUnairedNextUp",
+            label: "Show unaired Next Up episodes",
+            detail: "Include upcoming episodes before their release date",
+            keywords: "future upcoming release air date",
+            control: { kind: "switch" },
+          },
+          {
+            id: "continueWatchingSortMode",
+            label: "Sort order",
+            detail: "Choose how released and upcoming items are arranged",
+            control: {
+              kind: "preset",
+              options: [
+                ["Default — newest activity", "DEFAULT"],
+                ["Streaming style — upcoming last", "STREAMING_STYLE"],
+                ["Separate Upcoming row", "SPLIT_UPCOMING"],
+              ],
+            },
+          },
+        ],
+      },
+      {
+        title: "On launch",
+        subtitle: "This preference also applies to official Nuvio clients.",
+        settings: [
+          {
+            id: "continueWatchingShowResumePromptOnLaunch",
+            label: "Resume prompt on launch",
+            detail: "Synced exactly; this prototype does not yet show a launch popup",
+            keywords: "startup continue player prompt",
+            control: { kind: "switch" },
+          },
+        ],
+      },
+    ],
+  },
+  {
     id: "collections",
     label: "Collections",
     icon: "collections",
@@ -225,6 +347,299 @@ export const SECTIONS: SettingSection[] = [
     ],
   },
   {
+    id: "integrations",
+    label: "Integrations",
+    icon: "settings",
+    scope: "mixed",
+    subtitle: "Metadata, ratings and connected playback services.",
+    groups: [
+      {
+        title: "TMDB",
+        subtitle:
+          "Use your personal TMDB API key to enrich artwork and metadata.",
+        settings: [
+          {
+            id: "tmdbApiKey",
+            label: "TMDB API key",
+            detail: "Synced securely through Nuvio's provider credentials",
+            keywords: "the movie database token credential",
+            control: {
+              kind: "credential",
+              provider: "tmdb",
+              placeholder: "Personal API key",
+            },
+          },
+          {
+            id: "tmdbEnabled",
+            label: "Enable TMDB",
+            detail: "Apply the selected TMDB enrichment modules",
+            requiresCredential: "tmdbApiKey",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbLanguage",
+            label: "Preferred language",
+            detail: "TMDB language code, such as en or pt-BR",
+            requiresCredential: "tmdbApiKey",
+            control: { kind: "text", placeholder: "en" },
+          },
+          {
+            id: "tmdbUseTrailers",
+            label: "Trailers",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseArtwork",
+            label: "Artwork",
+            detail: "Backdrops, posters and title logos",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseBasicInfo",
+            label: "Basic information",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseDetails",
+            label: "Details",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseReleaseDates",
+            label: "Release dates",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseCredits",
+            label: "Cast and crew",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseProductions",
+            label: "Production companies",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseNetworks",
+            label: "Networks",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseEpisodes",
+            label: "Episode metadata",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseSeasonPosters",
+            label: "Season posters",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseMoreLikeThis",
+            label: "More like this",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+          {
+            id: "tmdbUseCollections",
+            label: "Collections",
+            requiresCredential: "tmdbApiKey",
+            enabledWhen: "tmdbEnabled",
+            control: { kind: "switch" },
+          },
+        ],
+      },
+      {
+        title: "MDBList",
+        subtitle: "Choose which rating badges MDBList supplies.",
+        settings: [
+          {
+            id: "mdbListApiKey",
+            label: "MDBList API key",
+            detail: "Synced securely through Nuvio's provider credentials",
+            keywords: "ratings token credential",
+            control: {
+              kind: "credential",
+              provider: "mdblist",
+              placeholder: "Personal API key",
+            },
+          },
+          {
+            id: "mdbListEnabled",
+            label: "Enable MDBList",
+            detail: "Show ratings from the selected providers",
+            requiresCredential: "mdbListApiKey",
+            control: { kind: "switch" },
+          },
+          ...(
+            [
+              ["mdbListUseImdb", "IMDb"],
+              ["mdbListUseTmdb", "TMDB"],
+              ["mdbListUseTomatoes", "Rotten Tomatoes"],
+              ["mdbListUseMetacritic", "Metacritic"],
+              ["mdbListUseTrakt", "Trakt"],
+              ["mdbListUseLetterboxd", "Letterboxd"],
+              ["mdbListUseAudience", "Audience"],
+              ["mdbListUseMal", "MyAnimeList"],
+            ] as const
+          ).map(([id, label]) => ({
+            id,
+            label,
+            requiresCredential: "mdbListApiKey" as const,
+            enabledWhen: "mdbListEnabled" as const,
+            control: { kind: "switch" as const },
+          })),
+        ],
+      },
+      {
+        title: "Debrid",
+        subtitle:
+          "Securely sync Torbox and Premiumize access tokens. This build can apply Debrid source rules, but direct torrent-to-link resolution and device-code sign-in are not ported yet.",
+        settings: [
+          {
+            id: "torboxApiKey",
+            label: "Torbox access token",
+            detail: "Synced as debrid:torbox through Nuvio provider credentials",
+            keywords: "debrid api key token cloud torrent",
+            control: {
+              kind: "credential",
+              provider: "debrid:torbox",
+              placeholder: "Torbox access token",
+            },
+          },
+          {
+            id: "premiumizeApiKey",
+            label: "Premiumize access token",
+            detail: "Synced as debrid:premiumize through Nuvio provider credentials",
+            keywords: "debrid api key token cloud torrent",
+            control: {
+              kind: "credential",
+              provider: "debrid:premiumize",
+              placeholder: "Premiumize access token",
+            },
+          },
+          {
+            id: "debridEnabled",
+            label: "Enable Debrid sources",
+            detail: "Apply the connected resolver and stream rules to addon Debrid candidates",
+            requiresAnyCredential: ["torboxApiKey", "premiumizeApiKey"],
+            control: { kind: "switch" },
+          },
+          {
+            id: "debridPreferredResolverProviderId",
+            label: "Preferred service",
+            detail: "Only connected services can be selected",
+            requires: "debridEnabled",
+            requiresAnyCredential: ["torboxApiKey", "premiumizeApiKey"],
+            control: {
+              kind: "preset",
+              options: [
+                ["Torbox", "torbox"],
+                ["Premiumize", "premiumize"],
+              ],
+            },
+          },
+          {
+            id: "debridStreamMaxResults",
+            label: "Maximum Debrid results",
+            detail: "Zero keeps every matching result",
+            requires: "debridEnabled",
+            control: { kind: "number", min: 0, max: 100 },
+          },
+          {
+            id: "debridStreamSortMode",
+            label: "Debrid result order",
+            requires: "debridEnabled",
+            control: {
+              kind: "preset",
+              options: [
+                ["Addon order", "DEFAULT"],
+                ["Best quality", "QUALITY_DESC"],
+                ["Largest", "SIZE_DESC"],
+                ["Smallest", "SIZE_ASC"],
+              ],
+            },
+          },
+          {
+            id: "debridStreamMinimumQuality",
+            label: "Minimum resolution",
+            requires: "debridEnabled",
+            control: {
+              kind: "preset",
+              options: [
+                ["Any", "ANY"],
+                ["720p", "P720"],
+                ["1080p", "P1080"],
+                ["4K", "P2160"],
+              ],
+            },
+          },
+          {
+            id: "debridStreamDolbyVisionFilter",
+            label: "Dolby Vision",
+            requires: "debridEnabled",
+            control: {
+              kind: "preset",
+              options: [
+                ["Any", "ANY"],
+                ["Exclude", "EXCLUDE"],
+                ["Only", "ONLY"],
+              ],
+            },
+          },
+          {
+            id: "debridStreamHdrFilter",
+            label: "HDR",
+            requires: "debridEnabled",
+            control: {
+              kind: "preset",
+              options: [
+                ["Any", "ANY"],
+                ["Exclude", "EXCLUDE"],
+                ["Only", "ONLY"],
+              ],
+            },
+          },
+          {
+            id: "debridStreamCodecFilter",
+            label: "Video codec",
+            requires: "debridEnabled",
+            control: {
+              kind: "preset",
+              options: [
+                ["Any", "ANY"],
+                ["H.264", "H264"],
+                ["HEVC", "HEVC"],
+                ["AV1", "AV1"],
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  },
+  {
     id: "playback",
     label: "Playback",
     icon: "play",
@@ -244,7 +659,6 @@ export const SECTIONS: SettingSection[] = [
               kind: "preset",
               options: [
                 ["Fit", "Fit"],
-                ["Fill", "Fill"],
                 ["Zoom", "Zoom"],
                 ["Stretch", "Stretch"],
               ],
@@ -306,7 +720,6 @@ export const SECTIONS: SettingSection[] = [
               options: [
                 ["All sources", "ALL_SOURCES"],
                 ["Installed addons only", "INSTALLED_ADDONS_ONLY"],
-                ["Plugins only", "ENABLED_PLUGINS_ONLY"],
               ],
             },
           },
@@ -411,28 +824,41 @@ export const SECTIONS: SettingSection[] = [
           },
           {
             id: "animeSkipEnabled",
-            label: "AniSkip",
-            detail: "Use AniSkip timings for anime",
+            label: "Anime-Skip",
+            detail: "Use Anime-Skip timings when a client ID is configured",
             keywords: "anime opening ending",
             control: { kind: "switch" },
           },
           {
             id: "animeSkipClientId",
-            label: "AniSkip client ID",
+            label: "Anime-Skip client ID",
+            detail: "Synced securely with this profile, outside the settings blob",
+            keywords: "anime skip credential token",
             requires: "animeSkipEnabled",
-            control: { kind: "text", secret: true, placeholder: "Client ID" },
-          },
-          {
-            id: "introDbApiKey",
-            label: "IntroDB API key",
-            detail: "Community intro timings",
-            control: { kind: "text", secret: true, placeholder: "API key" },
+            control: {
+              kind: "credential",
+              provider: "animeskip",
+              placeholder: "Client ID",
+            },
           },
           {
             id: "introSubmitEnabled",
             label: "Contribute timings",
-            detail: "Submit intro timings you skip back to IntroDB",
+            detail: "Allow this device to submit marked intro timings to IntroDB",
+            local: true,
             control: { kind: "switch" },
+          },
+          {
+            id: "introDbApiKey",
+            label: "IntroDB API key",
+            detail: "Synced securely with this profile, outside the settings blob",
+            keywords: "intro database submit credential token",
+            requires: "introSubmitEnabled",
+            control: {
+              kind: "credential",
+              provider: "introdb",
+              placeholder: "API key",
+            },
           },
         ],
       },
@@ -493,9 +919,9 @@ export const SECTIONS: SettingSection[] = [
             control: {
               kind: "preset",
               options: [
-                ["All", "ALL_SUBTITLES"],
+                ["Fast startup", "FAST_STARTUP"],
                 ["Preferred only", "PREFERRED_ONLY"],
-                ["None", "NONE"],
+                ["All subtitles", "ALL_SUBTITLES"],
               ],
             },
           },
@@ -508,7 +934,7 @@ export const SECTIONS: SettingSection[] = [
           {
             id: "subtitleFontSize",
             label: "Text size",
-            control: { kind: "number", min: 12, max: 40, suffix: "px" },
+            control: { kind: "number", min: 6, max: 40, suffix: "px" },
           },
           {
             id: "subtitleBold",
@@ -602,45 +1028,6 @@ export const SECTIONS: SettingSection[] = [
             id: "externalPlayerEnabled",
             label: "Use an external player",
             keywords: "vlc mpc potplayer",
-            control: { kind: "switch" },
-          },
-          {
-            id: "externalPlayerId",
-            label: "Player",
-            requires: "externalPlayerEnabled",
-            control: { kind: "text", placeholder: "e.g. vlc" },
-          },
-          {
-            id: "externalPlayerForwardSubtitles",
-            label: "Forward subtitles",
-            requires: "externalPlayerEnabled",
-            control: { kind: "switch" },
-          },
-          {
-            id: "externalPlayerSendSkipSegments",
-            label: "Forward skip segments",
-            requires: "externalPlayerEnabled",
-            control: { kind: "switch" },
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "notifications",
-    label: "Notifications",
-    icon: "info",
-    scope: "device",
-    subtitle: "Alerts for series you follow.",
-    groups: [
-      {
-        title: "Episodes",
-        subtitle: "Releases for titles in your library.",
-        settings: [
-          {
-            id: "episodeReleaseAlerts",
-            label: "Episode release alerts",
-            keywords: "notify new episode",
             control: { kind: "switch" },
           },
         ],

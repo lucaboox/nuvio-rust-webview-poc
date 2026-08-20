@@ -7,6 +7,7 @@
     "prepare:runtime": "node scripts/prepare-libmpv.mjs",
     "build:ui": "vite build",
     "check:ui": "tsc -b",
+    "test:ui": "node --experimental-strip-types --test ui/src/data/*.test.mjs",
     "dev:ui": "vite",
     "build": "npm run prepare:runtime && npm run build:ui && cargo build --manifest-path shell/Cargo.toml",
     "dev": "npm run prepare:runtime && npm run build:ui && cargo run --manifest-path shell/Cargo.toml",

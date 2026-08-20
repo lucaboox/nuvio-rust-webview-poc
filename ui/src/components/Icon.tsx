@@ -1,6 +1,6 @@
 import {
   CalendarDays, Compass, Download, House, Layers, Library, ListVideo, Pause, Play, Puzzle,
-  Settings, SlidersHorizontal, type LucideIcon,
+  Settings, type LucideIcon,
 } from "lucide-react";
 
 type IconName = "home" | "discover" | "library" | "calendar" | "downloads" | "collections" | "addons" | "settings" | "search" | "play" | "pause" | "rewind" | "forward" | "volume" | "muted" | "fullscreen" | "subtitles" | "audio" | "info" | "logout" | "plus" | "back" | "close" | "refresh" | "copy" | "up" | "down" | "edit" | "drag" | "trash" | "external" | "gear" | "check" | "video" | "episodes" | "sources" | "eye";
@@ -19,7 +19,7 @@ const lucide: Partial<Record<IconName, LucideIcon>> = {
   calendar: CalendarDays,
   downloads: Download,
   addons: Puzzle,
-  settings: SlidersHorizontal,
+  settings: Settings,
   // Distinct from `settings`, which is the sliders glyph used for the nav. A
   // cog is what an addon's own configuration page is labelled with elsewhere.
   gear: Settings,

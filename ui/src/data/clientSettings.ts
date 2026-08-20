@@ -13,11 +13,15 @@ export type ClientSettings = {
   clickToPause: boolean;
   /** Decode a preview frame when hovering the seek bar. */
   seekThumbnails: boolean;
+  /** Allow submitting marked intro timings to IntroDB. Official Nuvio keeps
+   * this device-local and deliberately omits it from profile sync. */
+  introSubmitEnabled: boolean;
 };
 
 const DEFAULTS: ClientSettings = {
   clickToPause: true,
   seekThumbnails: false,
+  introSubmitEnabled: false,
 };
 
 const STORAGE_KEY = "nuvio.clientSettings";
@@ -31,6 +35,8 @@ function read(): ClientSettings {
     return {
       clickToPause: stored.clickToPause ?? DEFAULTS.clickToPause,
       seekThumbnails: stored.seekThumbnails ?? DEFAULTS.seekThumbnails,
+      introSubmitEnabled:
+        stored.introSubmitEnabled ?? DEFAULTS.introSubmitEnabled,
     };
   } catch {
     return DEFAULTS;

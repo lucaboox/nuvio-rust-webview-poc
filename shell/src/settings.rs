@@ -9,8 +9,16 @@ use crate::metadata::{MdbListMetadataSettings, MetadataConfig, TmdbMetadataSetti
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
     pub amoled_enabled: bool,
+    pub continue_watching_visible: bool,
+    pub continue_watching_style: String,
+    pub continue_watching_up_next_from_furthest_episode: bool,
+    pub continue_watching_use_episode_thumbnails: bool,
+    pub continue_watching_show_unaired_next_up: bool,
+    pub continue_watching_blur_next_up: bool,
     /// Next-up cards hidden from Continue Watching, by nextUpDismissKey.
     pub dismissed_next_up: Vec<String>,
+    pub continue_watching_show_resume_prompt_on_launch: bool,
+    pub continue_watching_sort_mode: String,
     pub show_loading_overlay: bool,
     pub show_parental_guide: bool,
     pub resize_mode: String,
@@ -59,9 +67,6 @@ pub struct SettingsSnapshot {
     pub autoplay_next_episode_fallback: bool,
     // Skip segments
     pub anime_skip_enabled: bool,
-    pub anime_skip_client_id: String,
-    pub intro_db_api_key: String,
-    pub intro_submit_enabled: bool,
     // Gestures (Nuvio syncs these; they are not client-only)
     pub hold_to_speed: bool,
     pub hold_to_speed_value: f64,
@@ -70,6 +75,78 @@ pub struct SettingsSnapshot {
     pub external_player_id: String,
     pub external_player_forward_subtitles: bool,
     pub external_player_send_skip_segments: bool,
+    // TMDB enrichment (the API key is a provider credential, never part of this
+    // profile-settings snapshot).
+    pub tmdb_enabled: bool,
+    pub tmdb_language: String,
+    pub tmdb_use_trailers: bool,
+    pub tmdb_use_artwork: bool,
+    pub tmdb_use_basic_info: bool,
+    pub tmdb_use_details: bool,
+    pub tmdb_use_release_dates: bool,
+    pub tmdb_use_credits: bool,
+    pub tmdb_use_productions: bool,
+    pub tmdb_use_networks: bool,
+    pub tmdb_use_episodes: bool,
+    pub tmdb_use_season_posters: bool,
+    pub tmdb_use_more_like_this: bool,
+    pub tmdb_use_collections: bool,
+    // MDBList ratings (same credential separation as TMDB).
+    pub mdb_list_enabled: bool,
+    pub mdb_list_use_imdb: bool,
+    pub mdb_list_use_tmdb: bool,
+    pub mdb_list_use_tomatoes: bool,
+    pub mdb_list_use_metacritic: bool,
+    pub mdb_list_use_trakt: bool,
+    pub mdb_list_use_letterboxd: bool,
+    pub mdb_list_use_audience: bool,
+    pub mdb_list_use_mal: bool,
+    // Debrid. Provider access tokens are deliberately kept in the separate
+    // provider-credential store below; only non-secret behavior is synced in
+    // the profile settings blob.
+    pub debrid_enabled: bool,
+    pub debrid_cloud_library_enabled: bool,
+    pub debrid_preferred_resolver_provider_id: String,
+    pub debrid_instant_playback_preparation_limit: i64,
+    pub debrid_stream_max_results: i64,
+    pub debrid_stream_sort_mode: String,
+    pub debrid_stream_minimum_quality: String,
+    pub debrid_stream_dolby_vision_filter: String,
+    pub debrid_stream_hdr_filter: String,
+    pub debrid_stream_codec_filter: String,
+    pub debrid_stream_preferences: String,
+    pub debrid_stream_name_template: String,
+    pub debrid_stream_description_template: String,
+}
+
+/// Provider credentials currently editable by this client. This is deliberately
+/// separate from `SettingsSnapshot`: it is only returned by the integrations
+/// command, so bootstrap/account payloads do not repeatedly expose secrets to
+/// the WebView.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationCredentialSnapshot {
+    pub tmdb_api_key: String,
+    pub mdb_list_api_key: String,
+    pub anime_skip_client_id: String,
+    pub intro_db_api_key: String,
+    pub torbox_api_key: String,
+    pub premiumize_api_key: String,
+    pub real_debrid_api_key: String,
+}
+
+#[derive(Clone)]
+struct ProviderCredentialRow {
+    provider: String,
+    credential_json: Map<String, Value>,
+}
+
+/// Raw provider rows are retained in memory because the push RPC replaces the
+/// provider set. Keeping the full credential objects prevents a TMDB edit from
+/// erasing Debrid, Anime-Skip, or fields introduced by a newer Nuvio client.
+#[derive(Clone, Default)]
+pub struct ProviderCredentialStore {
+    rows: Vec<ProviderCredentialRow>,
 }
 
 /// Nuvio stores poster card style as a JSON *string* inside the settings blob
@@ -78,6 +155,7 @@ const POSTER_PAYLOAD_KEY: &str = "poster_card_style_settings_payload";
 const CONTINUE_WATCHING_PAYLOAD_KEY: &str = "continue_watching_settings_payload";
 const DEFAULT_POSTER_WIDTH: i64 = 126;
 const DEFAULT_POSTER_CORNER_RADIUS: i64 = 12;
+const DEFAULT_DEBRID_STREAM_NAME_TEMPLATE: &str = "{stream.resolution::exists[\"{stream.resolution} \"||\"\"]}{service.shortName::exists[\"{service.shortName}\"||\"Cloud\"]} Instant";
 
 /// Nuvio's `nextUpDismissKey`: `contentId|season|episode`, with -1 standing in
 /// for a missing season or episode.
@@ -103,17 +181,133 @@ fn continue_watching_payload(blob: &Value) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-pub fn dismissed_next_up(blob: &Value) -> Vec<String> {
-    continue_watching_payload(blob)
+/// Materialises Nuvio's complete StoredContinueWatchingPreferences payload
+/// while retaining fields introduced by newer clients. Kotlin writes this JSON
+/// with `encodeDefaults = true`; preserving the original map first means a
+/// desktop edit neither drops future fields nor the user's dismissal set.
+fn normalized_continue_watching_payload(payload: &Map<String, Value>) -> Map<String, Value> {
+    let read_bool = |key: &str, fallback: bool| {
+        payload
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(fallback)
+    };
+    let read_enum = |key: &str, allowed: &[&str], fallback: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| allowed.contains(value))
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let mut normalized = payload.clone();
+    normalized.insert("isVisible".to_string(), json!(read_bool("isVisible", true)));
+    normalized.insert(
+        "style".to_string(),
+        json!(read_enum("style", &["Card", "Wide", "Poster"], "Card")),
+    );
+    normalized.insert(
+        "upNextFromFurthestEpisode".to_string(),
+        json!(read_bool("upNextFromFurthestEpisode", true)),
+    );
+    normalized.insert(
+        "use_episode_thumbnails_in_cw".to_string(),
+        json!(read_bool("use_episode_thumbnails_in_cw", true)),
+    );
+    normalized.insert(
+        "show_unaired_next_up".to_string(),
+        json!(read_bool("show_unaired_next_up", true)),
+    );
+    normalized.insert(
+        "blur_continue_watching_next_up".to_string(),
+        json!(read_bool("blur_continue_watching_next_up", false)),
+    );
+    normalized.insert(
+        "dismissedNextUpKeys".to_string(),
+        json!(normalized_dismissed_next_up_keys(payload)),
+    );
+    normalized.insert(
+        "showResumePromptOnLaunch".to_string(),
+        json!(read_bool("showResumePromptOnLaunch", true)),
+    );
+    normalized.insert(
+        "sort_mode".to_string(),
+        json!(read_enum(
+            "sort_mode",
+            &["DEFAULT", "STREAMING_STYLE", "SPLIT_UPCOMING"],
+            "DEFAULT",
+        )),
+    );
+    normalized
+}
+
+fn normalized_dismissed_next_up_keys(payload: &Map<String, Value>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    payload
         .get("dismissedNextUpKeys")
         .and_then(Value::as_array)
-        .map(|keys| {
-            keys.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .filter(|key| seen.insert((*key).to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn set_continue_watching_setting(blob: &mut Value, key: &str, value: Value) -> Result<()> {
+    let current = continue_watching_payload(blob);
+    let mut payload = normalized_continue_watching_payload(&current);
+    let storage_key = match key {
+        "continueWatchingVisible" => "isVisible",
+        "continueWatchingStyle" => "style",
+        "continueWatchingUpNextFromFurthestEpisode" => "upNextFromFurthestEpisode",
+        "continueWatchingUseEpisodeThumbnails" => "use_episode_thumbnails_in_cw",
+        "continueWatchingShowUnairedNextUp" => "show_unaired_next_up",
+        "continueWatchingBlurNextUp" => "blur_continue_watching_next_up",
+        "continueWatchingShowResumePromptOnLaunch" => "showResumePromptOnLaunch",
+        "continueWatchingSortMode" => "sort_mode",
+        _ => bail!("unknown Continue Watching setting"),
+    };
+    match key {
+        "continueWatchingStyle" => {
+            bail_unless(
+                matches!(value.as_str(), Some("Card" | "Wide" | "Poster")),
+                "unsupported Continue Watching style",
+            )?;
+        }
+        "continueWatchingSortMode" => {
+            bail_unless(
+                matches!(
+                    value.as_str(),
+                    Some("DEFAULT" | "STREAMING_STYLE" | "SPLIT_UPCOMING")
+                ),
+                "unsupported Continue Watching sort mode",
+            )?;
+        }
+        _ => {
+            bail_unless(
+                value.is_boolean(),
+                "Continue Watching setting must be true or false",
+            )?;
+        }
+    }
+    payload.insert(storage_key.to_string(), value);
+    let encoded = serde_json::to_string(&Value::Object(payload))
+        .context("Continue Watching preferences could not be encoded")?;
+    let root = blob
+        .as_object_mut()
+        .context("settings blob is not an object")?;
+    object_entry(root, "features")?.insert(
+        CONTINUE_WATCHING_PAYLOAD_KEY.to_string(),
+        Value::String(encoded),
+    );
+    Ok(())
+}
+
+pub fn dismissed_next_up(blob: &Value) -> Vec<String> {
+    normalized_dismissed_next_up_keys(&continue_watching_payload(blob))
 }
 
 /// Clears every dismissal for a title.
@@ -135,7 +329,8 @@ pub fn clear_dismissed_for_content(
         return Ok(None);
     }
     let mut blob = current_blob.clone();
-    let mut payload = continue_watching_payload(&blob);
+    sanitize_profile_blob(&mut blob);
+    let mut payload = normalized_continue_watching_payload(&continue_watching_payload(&blob));
     let kept: Vec<String> = existing
         .into_iter()
         .filter(|key| !key.starts_with(&prefix))
@@ -169,7 +364,8 @@ pub fn set_next_up_dismissed(
     dismissed: bool,
 ) -> Result<(SettingsSnapshot, Value)> {
     let mut blob = current_blob.clone();
-    let mut payload = continue_watching_payload(&blob);
+    sanitize_profile_blob(&mut blob);
+    let mut payload = normalized_continue_watching_payload(&continue_watching_payload(&blob));
     let mut keys: Vec<String> = payload
         .get("dismissedNextUpKeys")
         .and_then(Value::as_array)
@@ -339,63 +535,259 @@ pub fn load(auth: &AuthService, profile_id: i32) -> Result<(SettingsSnapshot, Va
         "sync_pull_profile_settings_blob",
         &json!({ "p_profile_id": profile_id, "p_platform": "desktop" }),
     )?;
-    let blob = response
+    let mut blob = response
         .as_array()
         .and_then(|rows| rows.first())
         .and_then(|row| row.get("settings_json"))
         .cloned()
         .filter(Value::is_object)
         .unwrap_or_else(empty_blob);
+    // Older prototype builds accidentally put provider secrets in this blob.
+    // Strip both the official names and those legacy aliases before the value
+    // can become the source for any subsequent whole-blob push.
+    sanitize_profile_blob(&mut blob);
     Ok((snapshot(&blob), blob))
 }
 
-/// Builds the metadata switches from the settings blob already held by the
-/// application. Nuvio keeps this state alive for the selected profile; pulling
-/// the same blob again just to configure metadata makes every settings visit
-/// and update pay for an unnecessary network request.
-pub fn metadata_config_from_blob(
+pub fn load_provider_credentials(
     auth: &AuthService,
     profile_id: i32,
+) -> Result<ProviderCredentialStore> {
+    // Official Nuvio seeds its complete local provider shape before pulling.
+    // The seed RPC only inserts missing rows, so this makes fresh/self-hosted
+    // profiles readable without replacing remote or future-provider rows.
+    auth.rpc_unit(
+        "sync_seed_provider_credentials",
+        &required_provider_seed_params(profile_id, auth.sync_client_id()),
+    )?;
+    let response = auth.rpc_value(
+        "sync_pull_provider_credentials",
+        &json!({ "p_profile_id": profile_id }),
+    )?;
+    ProviderCredentialStore::from_rpc_value(&response)
+}
+
+fn required_provider_seed_params(profile_id: i32, origin_client_id: &str) -> Value {
+    json!({
+        "p_profile_id": profile_id,
+        "p_credentials": [
+            { "provider": "tmdb", "credential_json": { "api_key": "" } },
+            { "provider": "mdblist", "credential_json": { "api_key": "" } },
+            { "provider": "animeskip", "credential_json": { "client_id": "" } },
+            { "provider": "introdb", "credential_json": { "api_key": "" } },
+            { "provider": "debrid:torbox", "credential_json": { "api_key": "" } },
+            { "provider": "debrid:premiumize", "credential_json": { "api_key": "" } },
+            { "provider": "debrid:realdebrid", "credential_json": { "api_key": "" } },
+        ],
+        "p_origin_client_id": origin_client_id,
+    })
+}
+
+/// Builds metadata behavior from the profile blob and the separately synced
+/// provider credential cache. This function never performs I/O.
+pub fn metadata_config_from_blob(
     blob: &Value,
+    credentials: &ProviderCredentialStore,
 ) -> MetadataConfig {
-    let credentials = auth
-        .rpc_value(
-            "sync_pull_provider_credentials",
-            &json!({ "p_profile_id": profile_id }),
-        )
-        .unwrap_or_else(|_| json!([]));
-    let credential = |provider: &str| {
-        credentials
+    metadata_config_with_keys(
+        blob,
+        credentials.credential("tmdb", "api_key"),
+        credentials.credential("mdblist", "api_key"),
+    )
+}
+
+impl ProviderCredentialStore {
+    fn from_rpc_value(value: &Value) -> Result<Self> {
+        let rows = value
             .as_array()
-            .and_then(|rows| {
-                rows.iter().find(|row| {
-                    row.get("provider")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| value.eq_ignore_ascii_case(provider))
+            .context("provider credential response is not a list")?
+            .iter()
+            .map(|row| {
+                let provider = row
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|provider| !provider.is_empty())
+                    .context("provider credential row has no provider")?
+                    .to_string();
+                let credential_json = row
+                    .get("credential_json")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .context("provider credential payload is not an object")?;
+                Ok(ProviderCredentialRow {
+                    provider,
+                    credential_json,
                 })
             })
-            .and_then(|row| row.pointer("/credential_json/api_key"))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { rows })
+    }
+
+    fn credential(&self, provider: &str, field: &str) -> String {
+        self.rows
+            .iter()
+            .find(|row| row.provider.eq_ignore_ascii_case(provider))
+            .and_then(|row| row.credential_json.get(field))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
             .to_string()
-    };
-    let tmdb_api_key = credential("tmdb");
-    let mdblist_api_key = credential("mdblist");
-    metadata_config_with_keys(blob, tmdb_api_key, mdblist_api_key)
+    }
+
+    pub fn has_api_key(&self, provider: &str) -> bool {
+        !self.credential(provider, "api_key").is_empty()
+    }
+
+    pub fn anime_skip_client_id(&self) -> String {
+        self.credential("animeskip", "client_id")
+    }
+
+    pub fn intro_db_api_key(&self) -> String {
+        self.credential("introdb", "api_key")
+    }
+
+    pub fn configured_debrid_resolver_provider_ids(&self) -> Vec<&'static str> {
+        // This order is official Nuvio's provider registry order. Real-Debrid
+        // has a synced credential row but is deliberately hidden/disabled by
+        // the official provider policy, so it cannot become the active service.
+        ["torbox", "premiumize"]
+            .into_iter()
+            .filter(|provider| self.has_api_key(&format!("debrid:{provider}")))
+            .collect()
+    }
+
+    pub fn snapshot(&self) -> IntegrationCredentialSnapshot {
+        IntegrationCredentialSnapshot {
+            tmdb_api_key: self.credential("tmdb", "api_key"),
+            mdb_list_api_key: self.credential("mdblist", "api_key"),
+            anime_skip_client_id: self.anime_skip_client_id(),
+            intro_db_api_key: self.intro_db_api_key(),
+            torbox_api_key: self.credential("debrid:torbox", "api_key"),
+            premiumize_api_key: self.credential("debrid:premiumize", "api_key"),
+            real_debrid_api_key: self.credential("debrid:realdebrid", "api_key"),
+        }
+    }
+
+    fn with_credential(&self, provider: &str, value: &str) -> Result<Self> {
+        let field = match provider {
+            "tmdb" | "mdblist" | "introdb" | "debrid:torbox" | "debrid:premiumize"
+            | "debrid:realdebrid" => "api_key",
+            "animeskip" => "client_id",
+            _ => bail!("unsupported credential provider"),
+        };
+        let value = value.trim();
+        bail_unless(
+            value.len() <= 16 * 1024 && !value.contains(['\r', '\n']),
+            "provider credential is invalid",
+        )?;
+
+        let mut next = self.clone();
+        let mut found = false;
+        for row in &mut next.rows {
+            if row.provider.eq_ignore_ascii_case(provider) {
+                row.credential_json.insert(field.to_string(), json!(value));
+                found = true;
+            }
+        }
+        if !found {
+            next.rows.push(ProviderCredentialRow {
+                provider: provider.to_string(),
+                credential_json: Map::from_iter([(field.to_string(), json!(value))]),
+            });
+        }
+        Ok(next)
+    }
+
+    fn push_params(&self, profile_id: i32, origin_client_id: &str) -> Value {
+        json!({
+            "p_profile_id": profile_id,
+            "p_credentials": self.rows.iter().map(|row| json!({
+                "provider": row.provider,
+                "credential_json": row.credential_json,
+            })).collect::<Vec<_>>(),
+            "p_origin_client_id": origin_client_id,
+        })
+    }
 }
 
-/// Re-evaluates metadata switches after a settings write without refetching
-/// provider credentials that are already held in memory.
-pub fn metadata_config_from_cached_credentials(
-    blob: &Value,
-    current: &MetadataConfig,
-) -> MetadataConfig {
-    metadata_config_with_keys(
-        blob,
-        current.tmdb.api_key.clone(),
-        current.mdblist.api_key.clone(),
+/// Pull-before-merge is intentional: the RPC accepts the complete provider
+/// array, so writing from a stale startup cache could erase credentials changed
+/// on another device. Unknown providers and unknown fields are carried through.
+pub fn update_provider_credential(
+    auth: &AuthService,
+    profile_id: i32,
+    provider: &str,
+    value: &str,
+) -> Result<ProviderCredentialStore> {
+    let current = load_provider_credentials(auth, profile_id)?;
+    let next = current.with_credential(provider, value)?;
+    auth.rpc_unit(
+        "sync_push_provider_credentials",
+        &next.push_params(profile_id, auth.sync_client_id()),
+    )?;
+    Ok(next)
+}
+
+/// Mirrors `DebridSettingsRepository.setProviderApiKey`: the active resolver
+/// must always be a configured, visible provider and link resolving turns off
+/// when the final resolver credential is removed. This is a single full-blob
+/// write and leaves every unknown setting untouched.
+pub fn normalize_debrid_settings_for_credentials(
+    auth: &AuthService,
+    profile_id: i32,
+    current_blob: &Value,
+    credentials: &ProviderCredentialStore,
+) -> Result<(SettingsSnapshot, Value)> {
+    let mut blob = current_blob.clone();
+    sanitize_profile_blob(&mut blob);
+    let configured = credentials.configured_debrid_resolver_provider_ids();
+    let current_preferred = typed_string(
+        &blob,
+        "debrid_settings",
+        "debrid_preferred_resolver_provider_id",
     )
+    .unwrap_or_default();
+    let normalized_preferred = if configured.contains(&current_preferred.as_str()) {
+        current_preferred.clone()
+    } else {
+        configured.first().copied().unwrap_or_default().to_string()
+    };
+    let mut changed = false;
+    if current_preferred != normalized_preferred {
+        set_typed_preference(
+            &mut blob,
+            "debrid_settings",
+            "debrid_preferred_resolver_provider_id",
+            Kind::String,
+            json!(normalized_preferred),
+        )?;
+        changed = true;
+    }
+    if configured.is_empty()
+        && typed_bool(&blob, "debrid_settings", "debrid_enabled").unwrap_or(false)
+    {
+        set_typed_preference(
+            &mut blob,
+            "debrid_settings",
+            "debrid_enabled",
+            Kind::Boolean,
+            json!(false),
+        )?;
+        changed = true;
+    }
+    if changed {
+        auth.rpc_unit(
+            "sync_push_profile_settings_blob",
+            &json!({
+                "p_profile_id": profile_id,
+                "p_platform": "desktop",
+                "p_settings_json": blob,
+                "p_origin_client_id": auth.sync_client_id(),
+            }),
+        )?;
+    }
+    Ok((snapshot(&blob), blob))
 }
 
 fn metadata_config_with_keys(
@@ -418,8 +810,15 @@ fn metadata_config_with_keys(
             use_release_dates: typed_bool(&blob, "tmdb_settings", "tmdb_use_release_dates")
                 .unwrap_or(false),
             use_credits: typed_bool(&blob, "tmdb_settings", "tmdb_use_credits").unwrap_or(true),
+            use_productions: typed_bool(&blob, "tmdb_settings", "tmdb_use_productions")
+                .unwrap_or(true),
+            use_networks: typed_bool(&blob, "tmdb_settings", "tmdb_use_networks").unwrap_or(true),
             use_episodes: typed_bool(&blob, "tmdb_settings", "tmdb_use_episodes").unwrap_or(true),
             use_season_posters: typed_bool(&blob, "tmdb_settings", "tmdb_use_season_posters")
+                .unwrap_or(true),
+            use_more_like_this: typed_bool(&blob, "tmdb_settings", "tmdb_use_more_like_this")
+                .unwrap_or(true),
+            use_collections: typed_bool(&blob, "tmdb_settings", "tmdb_use_collections")
                 .unwrap_or(true),
         },
         mdblist: MdbListMetadataSettings {
@@ -455,8 +854,14 @@ pub fn update_cached(
     value: Value,
 ) -> Result<(SettingsSnapshot, Value)> {
     let mut blob = current_blob.clone();
+    // A full-blob push must never re-upload credentials left behind by an
+    // older prototype build. Official Nuvio syncs these through the dedicated
+    // provider-credentials RPC instead.
+    sanitize_profile_blob(&mut blob);
     if key.starts_with("poster") {
         set_poster_style(&mut blob, key, value)?;
+    } else if key.starts_with("continueWatching") {
+        set_continue_watching_setting(&mut blob, key, value)?;
     } else if key == "episodeReleaseAlerts" {
         let enabled = value
             .as_bool()
@@ -471,7 +876,8 @@ pub fn update_cached(
         let (feature, storage_key, kind) =
             setting_path(key).context("unknown or unsupported setting")?;
         let normalized = validate_value(key, value, kind)?;
-        set_typed_preference(&mut blob, feature, storage_key, kind, normalized)?;
+        set_typed_preference(&mut blob, feature, storage_key, kind, normalized.clone())?;
+        sync_legacy_debrid_stream_preference(&mut blob, key, &normalized)?;
     }
     auth.rpc_unit(
         "sync_push_profile_settings_blob",
@@ -486,15 +892,46 @@ pub fn update_cached(
 }
 
 pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
+    let continue_watching = normalized_continue_watching_payload(&continue_watching_payload(blob));
     SettingsSnapshot {
         amoled_enabled: typed_bool(blob, "theme_settings", "amoled_enabled").unwrap_or(false),
+        continue_watching_visible: continue_watching["isVisible"].as_bool().unwrap_or(true),
+        continue_watching_style: continue_watching["style"]
+            .as_str()
+            .unwrap_or("Card")
+            .to_string(),
+        continue_watching_up_next_from_furthest_episode:
+            continue_watching["upNextFromFurthestEpisode"]
+                .as_bool()
+                .unwrap_or(true),
+        continue_watching_use_episode_thumbnails: continue_watching["use_episode_thumbnails_in_cw"]
+            .as_bool()
+            .unwrap_or(true),
+        continue_watching_show_unaired_next_up: continue_watching["show_unaired_next_up"]
+            .as_bool()
+            .unwrap_or(true),
+        continue_watching_blur_next_up: continue_watching["blur_continue_watching_next_up"]
+            .as_bool()
+            .unwrap_or(false),
         dismissed_next_up: dismissed_next_up(blob),
+        continue_watching_show_resume_prompt_on_launch:
+            continue_watching["showResumePromptOnLaunch"]
+                .as_bool()
+                .unwrap_or(true),
+        continue_watching_sort_mode: continue_watching["sort_mode"]
+            .as_str()
+            .unwrap_or("DEFAULT")
+            .to_string(),
         show_loading_overlay: typed_bool(blob, "player_settings", "show_loading_overlay")
             .unwrap_or(true),
         show_parental_guide: typed_bool(blob, "player_settings", "show_parental_guide")
             .unwrap_or(true),
-        resize_mode: typed_string(blob, "player_settings", "resize_mode")
-            .unwrap_or_else(|| "Fit".to_string()),
+        // Official desktop treats the mobile-only Fill mode as Zoom.
+        resize_mode: match typed_string(blob, "player_settings", "resize_mode").as_deref() {
+            Some("Fill") => "Zoom".to_string(),
+            Some(value) => value.to_string(),
+            None => "Fit".to_string(),
+        },
         preferred_audio_language: typed_string(blob, "player_settings", "preferred_audio_language")
             .unwrap_or_else(|| "device".to_string()),
         preferred_subtitle_language: typed_string(
@@ -608,10 +1045,7 @@ pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
             "stream_auto_play_next_episode_fallback_enabled",
             true,
         ),
-        anime_skip_enabled: player_bool(blob, "anime_skip_enabled", false),
-        anime_skip_client_id: player_string(blob, "anime_skip_client_id", ""),
-        intro_db_api_key: player_string(blob, "intro_db_api_key", ""),
-        intro_submit_enabled: player_bool(blob, "intro_submit_enabled", false),
+        anime_skip_enabled: player_bool(blob, "animeskip_enabled", false),
         hold_to_speed: player_bool(blob, "hold_to_speed_enabled", true),
         hold_to_speed_value: typed_f64(blob, "player_settings", "hold_to_speed_value")
             .unwrap_or(2.0),
@@ -627,6 +1061,102 @@ pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
             "external_player_send_skip_segments",
             false,
         ),
+        tmdb_enabled: typed_bool(blob, "tmdb_settings", "tmdb_enabled").unwrap_or(false),
+        tmdb_language: typed_string(blob, "tmdb_settings", "tmdb_language")
+            .unwrap_or_else(|| "en".to_string()),
+        tmdb_use_trailers: typed_bool(blob, "tmdb_settings", "tmdb_use_trailers").unwrap_or(true),
+        tmdb_use_artwork: typed_bool(blob, "tmdb_settings", "tmdb_use_artwork").unwrap_or(true),
+        tmdb_use_basic_info: typed_bool(blob, "tmdb_settings", "tmdb_use_basic_info")
+            .unwrap_or(true),
+        tmdb_use_details: typed_bool(blob, "tmdb_settings", "tmdb_use_details").unwrap_or(true),
+        tmdb_use_release_dates: typed_bool(blob, "tmdb_settings", "tmdb_use_release_dates")
+            .unwrap_or(false),
+        tmdb_use_credits: typed_bool(blob, "tmdb_settings", "tmdb_use_credits").unwrap_or(true),
+        tmdb_use_productions: typed_bool(blob, "tmdb_settings", "tmdb_use_productions")
+            .unwrap_or(true),
+        tmdb_use_networks: typed_bool(blob, "tmdb_settings", "tmdb_use_networks").unwrap_or(true),
+        tmdb_use_episodes: typed_bool(blob, "tmdb_settings", "tmdb_use_episodes").unwrap_or(true),
+        tmdb_use_season_posters: typed_bool(blob, "tmdb_settings", "tmdb_use_season_posters")
+            .unwrap_or(true),
+        tmdb_use_more_like_this: typed_bool(blob, "tmdb_settings", "tmdb_use_more_like_this")
+            .unwrap_or(true),
+        tmdb_use_collections: typed_bool(blob, "tmdb_settings", "tmdb_use_collections")
+            .unwrap_or(true),
+        mdb_list_enabled: typed_bool(blob, "mdblist_settings", "mdblist_enabled").unwrap_or(false),
+        mdb_list_use_imdb: typed_bool(blob, "mdblist_settings", "mdblist_use_imdb").unwrap_or(true),
+        mdb_list_use_tmdb: typed_bool(blob, "mdblist_settings", "mdblist_use_tmdb").unwrap_or(true),
+        mdb_list_use_tomatoes: typed_bool(blob, "mdblist_settings", "mdblist_use_tomatoes")
+            .unwrap_or(true),
+        mdb_list_use_metacritic: typed_bool(blob, "mdblist_settings", "mdblist_use_metacritic")
+            .unwrap_or(true),
+        mdb_list_use_trakt: typed_bool(blob, "mdblist_settings", "mdblist_use_trakt")
+            .unwrap_or(true),
+        mdb_list_use_letterboxd: typed_bool(blob, "mdblist_settings", "mdblist_use_letterboxd")
+            .unwrap_or(true),
+        mdb_list_use_audience: typed_bool(blob, "mdblist_settings", "mdblist_use_audience")
+            .unwrap_or(true),
+        mdb_list_use_mal: typed_bool(blob, "mdblist_settings", "mdblist_use_mal").unwrap_or(true),
+        debrid_enabled: typed_bool(blob, "debrid_settings", "debrid_enabled").unwrap_or(false),
+        debrid_cloud_library_enabled: typed_bool(
+            blob,
+            "debrid_settings",
+            "debrid_cloud_library_enabled",
+        )
+        .unwrap_or(true),
+        debrid_preferred_resolver_provider_id: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_preferred_resolver_provider_id",
+        )
+        .unwrap_or_default(),
+        debrid_instant_playback_preparation_limit: typed_i64(
+            blob,
+            "debrid_settings",
+            "debrid_instant_playback_preparation_limit",
+        )
+        .unwrap_or(0),
+        debrid_stream_max_results: typed_i64(blob, "debrid_settings", "debrid_stream_max_results")
+            .unwrap_or(0),
+        debrid_stream_sort_mode: typed_string(blob, "debrid_settings", "debrid_stream_sort_mode")
+            .unwrap_or_else(|| "DEFAULT".to_string()),
+        debrid_stream_minimum_quality: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_minimum_quality",
+        )
+        .unwrap_or_else(|| "ANY".to_string()),
+        debrid_stream_dolby_vision_filter: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_dolby_vision_filter",
+        )
+        .unwrap_or_else(|| "ANY".to_string()),
+        debrid_stream_hdr_filter: typed_string(blob, "debrid_settings", "debrid_stream_hdr_filter")
+            .unwrap_or_else(|| "ANY".to_string()),
+        debrid_stream_codec_filter: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_codec_filter",
+        )
+        .unwrap_or_else(|| "ANY".to_string()),
+        debrid_stream_preferences: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_preferences",
+        )
+        .unwrap_or_default(),
+        debrid_stream_name_template: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_name_template",
+        )
+        .unwrap_or_else(|| DEFAULT_DEBRID_STREAM_NAME_TEMPLATE.to_string()),
+        debrid_stream_description_template: typed_string(
+            blob,
+            "debrid_settings",
+            "debrid_stream_description_template",
+        )
+        .unwrap_or_default(),
     }
 }
 
@@ -718,10 +1248,7 @@ fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
             "stream_auto_play_next_episode_fallback_enabled",
             Kind::Boolean,
         ),
-        "animeSkipEnabled" => ("player_settings", "anime_skip_enabled", Kind::Boolean),
-        "animeSkipClientId" => ("player_settings", "anime_skip_client_id", Kind::String),
-        "introDbApiKey" => ("player_settings", "intro_db_api_key", Kind::String),
-        "introSubmitEnabled" => ("player_settings", "intro_submit_enabled", Kind::Boolean),
+        "animeSkipEnabled" => ("player_settings", "animeskip_enabled", Kind::Boolean),
         "holdToSpeed" => ("player_settings", "hold_to_speed_enabled", Kind::Boolean),
         "holdToSpeedValue" => ("player_settings", "hold_to_speed_value", Kind::Float),
         "externalPlayerEnabled" => ("player_settings", "external_player_enabled", Kind::Boolean),
@@ -771,6 +1298,74 @@ fn setting_path(key: &str) -> Option<(&'static str, &'static str, Kind)> {
             "stream_badge_placement",
             Kind::String,
         ),
+        "tmdbEnabled" => ("tmdb_settings", "tmdb_enabled", Kind::Boolean),
+        "tmdbLanguage" => ("tmdb_settings", "tmdb_language", Kind::String),
+        "tmdbUseTrailers" => ("tmdb_settings", "tmdb_use_trailers", Kind::Boolean),
+        "tmdbUseArtwork" => ("tmdb_settings", "tmdb_use_artwork", Kind::Boolean),
+        "tmdbUseBasicInfo" => ("tmdb_settings", "tmdb_use_basic_info", Kind::Boolean),
+        "tmdbUseDetails" => ("tmdb_settings", "tmdb_use_details", Kind::Boolean),
+        "tmdbUseReleaseDates" => ("tmdb_settings", "tmdb_use_release_dates", Kind::Boolean),
+        "tmdbUseCredits" => ("tmdb_settings", "tmdb_use_credits", Kind::Boolean),
+        "tmdbUseProductions" => ("tmdb_settings", "tmdb_use_productions", Kind::Boolean),
+        "tmdbUseNetworks" => ("tmdb_settings", "tmdb_use_networks", Kind::Boolean),
+        "tmdbUseEpisodes" => ("tmdb_settings", "tmdb_use_episodes", Kind::Boolean),
+        "tmdbUseSeasonPosters" => ("tmdb_settings", "tmdb_use_season_posters", Kind::Boolean),
+        "tmdbUseMoreLikeThis" => ("tmdb_settings", "tmdb_use_more_like_this", Kind::Boolean),
+        "tmdbUseCollections" => ("tmdb_settings", "tmdb_use_collections", Kind::Boolean),
+        "mdbListEnabled" => ("mdblist_settings", "mdblist_enabled", Kind::Boolean),
+        "mdbListUseImdb" => ("mdblist_settings", "mdblist_use_imdb", Kind::Boolean),
+        "mdbListUseTmdb" => ("mdblist_settings", "mdblist_use_tmdb", Kind::Boolean),
+        "mdbListUseTomatoes" => ("mdblist_settings", "mdblist_use_tomatoes", Kind::Boolean),
+        "mdbListUseMetacritic" => ("mdblist_settings", "mdblist_use_metacritic", Kind::Boolean),
+        "mdbListUseTrakt" => ("mdblist_settings", "mdblist_use_trakt", Kind::Boolean),
+        "mdbListUseLetterboxd" => ("mdblist_settings", "mdblist_use_letterboxd", Kind::Boolean),
+        "mdbListUseAudience" => ("mdblist_settings", "mdblist_use_audience", Kind::Boolean),
+        "mdbListUseMal" => ("mdblist_settings", "mdblist_use_mal", Kind::Boolean),
+        "debridEnabled" => ("debrid_settings", "debrid_enabled", Kind::Boolean),
+        "debridCloudLibraryEnabled" => (
+            "debrid_settings",
+            "debrid_cloud_library_enabled",
+            Kind::Boolean,
+        ),
+        "debridPreferredResolverProviderId" => (
+            "debrid_settings",
+            "debrid_preferred_resolver_provider_id",
+            Kind::String,
+        ),
+        "debridInstantPlaybackPreparationLimit" => (
+            "debrid_settings",
+            "debrid_instant_playback_preparation_limit",
+            Kind::Int,
+        ),
+        "debridStreamMaxResults" => ("debrid_settings", "debrid_stream_max_results", Kind::Int),
+        "debridStreamSortMode" => ("debrid_settings", "debrid_stream_sort_mode", Kind::String),
+        "debridStreamMinimumQuality" => (
+            "debrid_settings",
+            "debrid_stream_minimum_quality",
+            Kind::String,
+        ),
+        "debridStreamDolbyVisionFilter" => (
+            "debrid_settings",
+            "debrid_stream_dolby_vision_filter",
+            Kind::String,
+        ),
+        "debridStreamHdrFilter" => ("debrid_settings", "debrid_stream_hdr_filter", Kind::String),
+        "debridStreamCodecFilter" => (
+            "debrid_settings",
+            "debrid_stream_codec_filter",
+            Kind::String,
+        ),
+        "debridStreamPreferences" => ("debrid_settings", "debrid_stream_preferences", Kind::String),
+        "debridStreamNameTemplate" => (
+            "debrid_settings",
+            "debrid_stream_name_template",
+            Kind::String,
+        ),
+        "debridStreamDescriptionTemplate" => (
+            "debrid_settings",
+            "debrid_stream_description_template",
+            Kind::String,
+        ),
         _ => return None,
     })
 }
@@ -783,6 +1378,16 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         Kind::Float if value.as_f64().is_none() => bail!("{key} must be a number"),
         _ => {}
     }
+    let value = if key == "tmdbLanguage" {
+        let language = value.as_str().unwrap_or_default().trim().replace('_', "-");
+        bail_unless(
+            language.len() <= 32 && !language.contains(['\r', '\n']),
+            "invalid TMDB language code",
+        )?;
+        json!(language)
+    } else {
+        value
+    };
     match key {
         "resizeMode" if !matches!(value.as_str(), Some("Fit" | "Fill" | "Zoom" | "Stretch")) => {
             bail!("unsupported resize mode")
@@ -798,8 +1403,8 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         "badgePlacement" if !matches!(value.as_str(), Some("TOP" | "BOTTOM")) => {
             bail!("unsupported badge placement")
         }
-        "subtitleFontSize" if !(12..=40).contains(&value.as_i64().unwrap_or_default()) => {
-            bail!("subtitle size must be between 12 and 40")
+        "subtitleFontSize" if !(6..=40).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("subtitle size must be between 6 and 40")
         }
         "reuseLastStreamHours" if !(1..=720).contains(&value.as_i64().unwrap_or_default()) => {
             bail!("link reuse window must be between 1 and 720 hours")
@@ -837,7 +1442,7 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         "addonSubtitleStartupMode"
             if !matches!(
                 value.as_str(),
-                Some("ALL_SUBTITLES" | "PREFERRED_ONLY" | "NONE")
+                Some("FAST_STARTUP" | "PREFERRED_ONLY" | "ALL_SUBTITLES")
             ) =>
         {
             bail!("unsupported subtitle startup mode")
@@ -863,6 +1468,57 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         {
             bail!("next episode minutes must be between 0 and 3.5")
         }
+        "debridPreferredResolverProviderId"
+            if !matches!(value.as_str(), Some("" | "torbox" | "premiumize")) =>
+        {
+            bail!("unsupported debrid resolver provider")
+        }
+        "debridInstantPlaybackPreparationLimit"
+            if !(0..=5).contains(&value.as_i64().unwrap_or_default()) =>
+        {
+            bail!("instant preparation limit must be between 0 and 5")
+        }
+        "debridStreamMaxResults" if !(0..=100).contains(&value.as_i64().unwrap_or_default()) => {
+            bail!("debrid result limit must be between 0 and 100")
+        }
+        "debridStreamSortMode"
+            if !matches!(
+                value.as_str(),
+                Some("DEFAULT" | "QUALITY_DESC" | "SIZE_DESC" | "SIZE_ASC")
+            ) =>
+        {
+            bail!("unsupported debrid stream sort mode")
+        }
+        "debridStreamMinimumQuality"
+            if !matches!(value.as_str(), Some("ANY" | "P720" | "P1080" | "P2160")) =>
+        {
+            bail!("unsupported minimum debrid quality")
+        }
+        "debridStreamDolbyVisionFilter" | "debridStreamHdrFilter"
+            if !matches!(value.as_str(), Some("ANY" | "EXCLUDE" | "ONLY")) =>
+        {
+            bail!("unsupported debrid feature filter")
+        }
+        "debridStreamCodecFilter"
+            if !matches!(value.as_str(), Some("ANY" | "H264" | "HEVC" | "AV1")) =>
+        {
+            bail!("unsupported debrid codec filter")
+        }
+        "debridStreamPreferences" => {
+            let text = value.as_str().unwrap_or_default();
+            bail_unless(text.len() <= 256 * 1024, "debrid preferences are too large")?;
+            if !text.is_empty() {
+                bail_unless(
+                    serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object()),
+                    "debrid preferences must be a JSON object",
+                )?;
+            }
+        }
+        "debridStreamNameTemplate" | "debridStreamDescriptionTemplate"
+            if value.as_str().is_some_and(|text| text.len() > 64 * 1024) =>
+        {
+            bail!("debrid stream template is too large")
+        }
         "preferredAudioLanguage" | "preferredSubtitleLanguage"
             if value.as_str().is_some_and(|text| text.len() > 16) =>
         {
@@ -871,6 +1527,118 @@ fn validate_value(key: &str, value: Value, kind: Kind) -> Result<Value> {
         _ => {}
     }
     Ok(value)
+}
+
+/// Official Nuvio keeps the old simple Debrid controls and the newer JSON
+/// preference model in sync. Updating only the legacy key would appear to save
+/// here but be ignored by Nuvio after its next load, so mutate the matching JSON
+/// field while preserving every unrecognised preference.
+fn sync_legacy_debrid_stream_preference(blob: &mut Value, key: &str, value: &Value) -> Result<()> {
+    if !matches!(
+        key,
+        "debridStreamMaxResults"
+            | "debridStreamSortMode"
+            | "debridStreamMinimumQuality"
+            | "debridStreamDolbyVisionFilter"
+            | "debridStreamHdrFilter"
+            | "debridStreamCodecFilter"
+    ) {
+        return Ok(());
+    }
+    let mut preferences = typed_string(blob, "debrid_settings", "debrid_stream_preferences")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    match key {
+        "debridStreamMaxResults" => {
+            preferences.insert("maxResults".to_string(), value.clone());
+        }
+        "debridStreamSortMode" => {
+            let criteria = match value.as_str().unwrap_or("DEFAULT") {
+                "QUALITY_DESC" => json!([
+                    { "key": "RESOLUTION", "direction": "DESC" },
+                    { "key": "QUALITY", "direction": "DESC" },
+                    { "key": "SIZE", "direction": "DESC" }
+                ]),
+                "SIZE_DESC" => json!([{ "key": "SIZE", "direction": "DESC" }]),
+                "SIZE_ASC" => json!([{ "key": "SIZE", "direction": "ASC" }]),
+                _ => json!([]),
+            };
+            preferences.insert("sortCriteria".to_string(), criteria);
+        }
+        "debridStreamMinimumQuality" => {
+            let resolutions = match value.as_str().unwrap_or("ANY") {
+                "P720" => json!(["P2160", "P1440", "P1080", "P720"]),
+                "P1080" => json!(["P2160", "P1440", "P1080"]),
+                "P2160" => json!(["P2160"]),
+                _ => json!([]),
+            };
+            preferences.insert("requiredResolutions".to_string(), resolutions);
+        }
+        "debridStreamDolbyVisionFilter" => update_debrid_tag_filter(
+            &mut preferences,
+            value.as_str().unwrap_or("ANY"),
+            &["DV", "DV_ONLY", "HDR_DV"],
+        ),
+        "debridStreamHdrFilter" => update_debrid_tag_filter(
+            &mut preferences,
+            value.as_str().unwrap_or("ANY"),
+            &["HDR", "HDR10", "HDR10_PLUS", "HLG", "HDR_ONLY", "HDR_DV"],
+        ),
+        "debridStreamCodecFilter" => {
+            let encodes = match value.as_str().unwrap_or("ANY") {
+                "H264" => json!(["AVC"]),
+                "HEVC" => json!(["HEVC"]),
+                "AV1" => json!(["AV1"]),
+                _ => json!([]),
+            };
+            preferences.insert("requiredEncodes".to_string(), encodes);
+        }
+        _ => {}
+    }
+    let encoded = serde_json::to_string(&Value::Object(preferences))?;
+    set_typed_preference(
+        blob,
+        "debrid_settings",
+        "debrid_stream_preferences",
+        Kind::String,
+        json!(encoded),
+    )
+}
+
+fn update_debrid_tag_filter(preferences: &mut Map<String, Value>, mode: &str, tags: &[&str]) {
+    let required = debrid_string_list(preferences.get("requiredVisualTags"));
+    let excluded = debrid_string_list(preferences.get("excludedVisualTags"));
+    let tag_set = tags
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut required = required
+        .into_iter()
+        .filter(|item| !tag_set.contains(item.as_str()))
+        .collect::<Vec<_>>();
+    let mut excluded = excluded
+        .into_iter()
+        .filter(|item| !tag_set.contains(item.as_str()))
+        .collect::<Vec<_>>();
+    match mode {
+        "ONLY" => required.extend(tags.iter().map(|tag| (*tag).to_string())),
+        "EXCLUDE" => excluded.extend(tags.iter().map(|tag| (*tag).to_string())),
+        _ => {}
+    }
+    preferences.insert("requiredVisualTags".to_string(), json!(required));
+    preferences.insert("excludedVisualTags".to_string(), json!(excluded));
+}
+
+fn debrid_string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn set_typed_preference(
@@ -896,6 +1664,47 @@ fn set_typed_preference(
         json!({ "type": type_name, "value": value }),
     );
     Ok(())
+}
+
+/// Removes credentials and local-only values that official Nuvio omits before
+/// profile settings sync. The legacy aliases are from early versions of this
+/// proof of concept and are scrubbed too, so one unrelated setting change
+/// cannot put a secret or device-local preference back into the shared blob.
+fn sanitize_profile_blob(blob: &mut Value) {
+    const CREDENTIAL_KEYS: &[(&str, &[&str])] = &[
+        (
+            "player_settings",
+            &[
+                "animeskip_client_id",
+                "introdb_api_key",
+                "anime_skip_client_id",
+                "intro_db_api_key",
+                "intro_submit_enabled",
+            ],
+        ),
+        (
+            "debrid_settings",
+            &[
+                "debrid_torbox_api_key",
+                "debrid_premiumize_api_key",
+                "debrid_real_debrid_api_key",
+            ],
+        ),
+        ("tmdb_settings", &["tmdb_api_key"]),
+        ("mdblist_settings", &["mdblist_api_key"]),
+    ];
+
+    let Some(features) = blob.get_mut("features").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (feature, keys) in CREDENTIAL_KEYS {
+        let Some(settings) = features.get_mut(*feature).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for key in *keys {
+            settings.remove(*key);
+        }
+    }
 }
 
 fn object_entry<'a>(
@@ -1074,6 +1883,86 @@ mod tests {
     }
 
     #[test]
+    fn continue_watching_defaults_match_official_nuvio() {
+        let settings = snapshot(&empty_blob());
+        assert!(settings.continue_watching_visible);
+        assert_eq!(settings.continue_watching_style, "Card");
+        assert!(settings.continue_watching_up_next_from_furthest_episode);
+        assert!(settings.continue_watching_use_episode_thumbnails);
+        assert!(settings.continue_watching_show_unaired_next_up);
+        assert!(!settings.continue_watching_blur_next_up);
+        assert!(settings.dismissed_next_up.is_empty());
+        assert!(settings.continue_watching_show_resume_prompt_on_launch);
+        assert_eq!(settings.continue_watching_sort_mode, "DEFAULT");
+    }
+
+    #[test]
+    fn continue_watching_writes_preserve_dismissals_and_unknown_fields() {
+        let existing = json!({
+            "isVisible": true,
+            "style": "Card",
+            "dismissedNextUpKeys": [" show|1|2 ", "show|1|2", "other|3|4"],
+            "futureOption": { "keep": true }
+        });
+        let mut blob = json!({
+            "version": 3,
+            "features": {
+                CONTINUE_WATCHING_PAYLOAD_KEY: existing.to_string(),
+                "future_feature": { "keep": true }
+            }
+        });
+
+        set_continue_watching_setting(&mut blob, "continueWatchingStyle", json!("Poster")).unwrap();
+
+        let raw = blob
+            .pointer(&format!("/features/{CONTINUE_WATCHING_PAYLOAD_KEY}"))
+            .unwrap();
+        assert!(raw.is_string());
+        let payload: Value = serde_json::from_str(raw.as_str().unwrap()).unwrap();
+        assert_eq!(payload["style"], json!("Poster"));
+        assert_eq!(
+            payload["dismissedNextUpKeys"],
+            json!(["show|1|2", "other|3|4"])
+        );
+        assert_eq!(payload.pointer("/futureOption/keep"), Some(&json!(true)));
+        assert_eq!(
+            blob.pointer("/features/future_feature/keep"),
+            Some(&json!(true))
+        );
+        // Kotlin's encodeDefaults=true payload shape is materialised on write.
+        for key in [
+            "isVisible",
+            "style",
+            "upNextFromFurthestEpisode",
+            "use_episode_thumbnails_in_cw",
+            "show_unaired_next_up",
+            "blur_continue_watching_next_up",
+            "dismissedNextUpKeys",
+            "showResumePromptOnLaunch",
+            "sort_mode",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn continue_watching_rejects_invalid_types_and_enums() {
+        let mut blob = empty_blob();
+        assert!(
+            set_continue_watching_setting(&mut blob, "continueWatchingVisible", json!("yes"))
+                .is_err()
+        );
+        assert!(
+            set_continue_watching_setting(&mut blob, "continueWatchingStyle", json!("Landscape"))
+                .is_err()
+        );
+        assert!(
+            set_continue_watching_setting(&mut blob, "continueWatchingSortMode", json!("RANDOM"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn typed_settings_preserve_unrelated_fields() {
         let mut blob = json!({ "version": 3, "features": { "future_feature": { "keep": true } } });
         set_typed_preference(
@@ -1091,6 +1980,314 @@ mod tests {
         assert_eq!(
             typed_string(&blob, "player_settings", "resize_mode").as_deref(),
             Some("Fill")
+        );
+        assert_eq!(snapshot(&blob).resize_mode, "Zoom");
+    }
+
+    #[test]
+    fn provider_credential_merge_preserves_unknown_rows_and_fields() {
+        let current = ProviderCredentialStore::from_rpc_value(&json!([
+            {
+                "provider": "tmdb",
+                "credential_json": {
+                    "api_key": "old",
+                    "future_field": { "keep": true }
+                },
+                "updated_at": "ignored by the push contract"
+            },
+            {
+                "provider": "debrid:future-service",
+                "credential_json": {
+                    "api_key": "secret",
+                    "region": "west"
+                }
+            },
+            {
+                "provider": "animeskip",
+                "credential_json": {
+                    "client_id": "anime-client",
+                    "future_field": "keep"
+                }
+            },
+            {
+                "provider": "introdb",
+                "credential_json": { "api_key": "intro-key" }
+            }
+        ]))
+        .unwrap();
+
+        let next = current.with_credential("tmdb", "  replacement  ").unwrap();
+        let params = next.push_params(7, "desktop-client");
+
+        assert_eq!(params["p_profile_id"], json!(7));
+        assert_eq!(params["p_origin_client_id"], json!("desktop-client"));
+        assert_eq!(
+            params.pointer("/p_credentials/0/credential_json/api_key"),
+            Some(&json!("replacement"))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/0/credential_json/future_field/keep"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/1/provider"),
+            Some(&json!("debrid:future-service"))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/1/credential_json/region"),
+            Some(&json!("west"))
+        );
+        let anime = next
+            .with_credential("animeskip", " replacement-client ")
+            .unwrap();
+        assert_eq!(anime.anime_skip_client_id(), "replacement-client");
+        assert_eq!(anime.intro_db_api_key(), "intro-key");
+        let snapshot = anime.snapshot();
+        assert_eq!(snapshot.anime_skip_client_id, "replacement-client");
+        assert_eq!(snapshot.intro_db_api_key, "intro-key");
+        let anime_params = anime.push_params(7, "desktop-client");
+        assert_eq!(
+            anime_params.pointer("/p_credentials/2/credential_json/client_id"),
+            Some(&json!("replacement-client"))
+        );
+        assert_eq!(
+            anime_params.pointer("/p_credentials/2/credential_json/future_field"),
+            Some(&json!("keep"))
+        );
+    }
+
+    #[test]
+    fn provider_seed_uses_official_fields_without_a_replace_payload() {
+        let params = required_provider_seed_params(4, "desktop-client");
+        assert_eq!(params["p_profile_id"], json!(4));
+        assert_eq!(params["p_origin_client_id"], json!("desktop-client"));
+        assert_eq!(
+            params.pointer("/p_credentials/0/credential_json/api_key"),
+            Some(&json!(""))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/2/credential_json/client_id"),
+            Some(&json!(""))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/3/provider"),
+            Some(&json!("introdb"))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/4/provider"),
+            Some(&json!("debrid:torbox"))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/5/provider"),
+            Some(&json!("debrid:premiumize"))
+        );
+        assert_eq!(
+            params.pointer("/p_credentials/6/provider"),
+            Some(&json!("debrid:realdebrid"))
+        );
+    }
+
+    #[test]
+    fn profile_blob_policy_strips_secrets_and_local_only_values() {
+        let mut blob = json!({
+            "version": 3,
+            "features": {
+                "player_settings": {
+                    "animeskip_client_id": { "type": "string", "value": "secret" },
+                    "introdb_api_key": { "type": "string", "value": "secret" },
+                    "anime_skip_client_id": { "type": "string", "value": "legacy" },
+                    "intro_db_api_key": { "type": "string", "value": "legacy" },
+                    "intro_submit_enabled": { "type": "boolean", "value": true },
+                    "animeskip_enabled": { "type": "boolean", "value": true },
+                    "future_player_option": { "keep": true }
+                },
+                "tmdb_settings": {
+                    "tmdb_api_key": { "type": "string", "value": "secret" },
+                    "tmdb_enabled": { "type": "boolean", "value": true }
+                },
+                "mdblist_settings": {
+                    "mdblist_api_key": { "type": "string", "value": "secret" },
+                    "mdblist_use_imdb": { "type": "boolean", "value": false }
+                },
+                "debrid_settings": {
+                    "debrid_torbox_api_key": { "type": "string", "value": "secret" },
+                    "debrid_premiumize_api_key": { "type": "string", "value": "secret" },
+                    "debrid_real_debrid_api_key": { "type": "string", "value": "secret" },
+                    "future_debrid_option": "keep"
+                },
+                "future_feature": { "keep": true }
+            }
+        });
+
+        sanitize_profile_blob(&mut blob);
+
+        for pointer in [
+            "/features/player_settings/animeskip_client_id",
+            "/features/player_settings/introdb_api_key",
+            "/features/player_settings/anime_skip_client_id",
+            "/features/player_settings/intro_db_api_key",
+            "/features/player_settings/intro_submit_enabled",
+            "/features/tmdb_settings/tmdb_api_key",
+            "/features/mdblist_settings/mdblist_api_key",
+            "/features/debrid_settings/debrid_torbox_api_key",
+            "/features/debrid_settings/debrid_premiumize_api_key",
+            "/features/debrid_settings/debrid_real_debrid_api_key",
+        ] {
+            assert!(
+                blob.pointer(pointer).is_none(),
+                "{pointer} should be stripped"
+            );
+        }
+        assert_eq!(
+            blob.pointer("/features/player_settings/animeskip_enabled/value"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            blob.pointer("/features/player_settings/future_player_option/keep"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            blob.pointer("/features/future_feature/keep"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn integration_settings_use_official_keys_and_defaults() {
+        let mut blob = empty_blob();
+        let defaults = snapshot(&blob);
+        assert!(!defaults.tmdb_enabled);
+        assert_eq!(defaults.tmdb_language, "en");
+        assert!(defaults.tmdb_use_trailers);
+        assert!(!defaults.tmdb_use_release_dates);
+        assert!(defaults.tmdb_use_collections);
+        assert!(!defaults.mdb_list_enabled);
+        assert!(defaults.mdb_list_use_imdb);
+        assert!(defaults.mdb_list_use_mal);
+        assert!(!defaults.debrid_enabled);
+        assert!(defaults.debrid_cloud_library_enabled);
+        assert_eq!(defaults.debrid_preferred_resolver_provider_id, "");
+        assert_eq!(defaults.debrid_instant_playback_preparation_limit, 0);
+        assert_eq!(defaults.debrid_stream_max_results, 0);
+        assert_eq!(defaults.debrid_stream_sort_mode, "DEFAULT");
+        assert_eq!(defaults.debrid_stream_minimum_quality, "ANY");
+        assert_eq!(defaults.debrid_stream_dolby_vision_filter, "ANY");
+        assert_eq!(defaults.debrid_stream_hdr_filter, "ANY");
+        assert_eq!(defaults.debrid_stream_codec_filter, "ANY");
+        assert_eq!(
+            defaults.debrid_stream_name_template,
+            DEFAULT_DEBRID_STREAM_NAME_TEMPLATE
+        );
+
+        for (key, value) in [
+            ("tmdbEnabled", json!(true)),
+            ("tmdbLanguage", json!("pt_BR")),
+            ("tmdbUseReleaseDates", json!(true)),
+            ("mdbListEnabled", json!(true)),
+            ("mdbListUseImdb", json!(false)),
+        ] {
+            let (feature, storage_key, kind) = setting_path(key).unwrap();
+            let value = validate_value(key, value, kind).unwrap();
+            set_typed_preference(&mut blob, feature, storage_key, kind, value).unwrap();
+        }
+
+        assert_eq!(
+            blob.pointer("/features/tmdb_settings/tmdb_language/value"),
+            Some(&json!("pt-BR"))
+        );
+        assert_eq!(
+            blob.pointer("/features/mdblist_settings/mdblist_use_imdb/value"),
+            Some(&json!(false))
+        );
+        let saved = snapshot(&blob);
+        assert!(saved.tmdb_enabled);
+        assert_eq!(saved.tmdb_language, "pt-BR");
+        assert!(saved.tmdb_use_release_dates);
+        assert!(saved.mdb_list_enabled);
+        assert!(!saved.mdb_list_use_imdb);
+
+        let serialized = serde_json::to_string(&saved).unwrap();
+        assert!(!serialized.contains("apiKey"));
+        assert!(!serialized.contains("api_key"));
+    }
+
+    #[test]
+    fn debrid_credentials_use_exact_rows_and_hide_real_debrid_from_resolver_policy() {
+        let current = ProviderCredentialStore::from_rpc_value(&json!([
+            {
+                "provider": "debrid:premiumize",
+                "credential_json": { "api_key": "pm", "future": true }
+            },
+            {
+                "provider": "debrid:realdebrid",
+                "credential_json": { "api_key": "rd" }
+            }
+        ]))
+        .unwrap();
+        assert_eq!(
+            current.configured_debrid_resolver_provider_ids(),
+            vec!["premiumize"]
+        );
+
+        let next = current
+            .with_credential("debrid:torbox", "  torbox-token  ")
+            .unwrap();
+        let snapshot = next.snapshot();
+        assert_eq!(snapshot.torbox_api_key, "torbox-token");
+        assert_eq!(snapshot.premiumize_api_key, "pm");
+        assert_eq!(snapshot.real_debrid_api_key, "rd");
+        assert_eq!(
+            next.configured_debrid_resolver_provider_ids(),
+            vec!["torbox", "premiumize"]
+        );
+        let params = next.push_params(3, "desktop-client");
+        assert_eq!(
+            params.pointer("/p_credentials/0/credential_json/future"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn debrid_legacy_controls_update_json_preferences_without_erasing_unknowns() {
+        let mut blob = empty_blob();
+        let initial = json!({
+            "futureRule": { "keep": true },
+            "requiredVisualTags": ["AI", "DV"],
+            "excludedVisualTags": ["THREE_D"]
+        })
+        .to_string();
+        set_typed_preference(
+            &mut blob,
+            "debrid_settings",
+            "debrid_stream_preferences",
+            Kind::String,
+            json!(initial),
+        )
+        .unwrap();
+
+        sync_legacy_debrid_stream_preference(
+            &mut blob,
+            "debridStreamDolbyVisionFilter",
+            &json!("EXCLUDE"),
+        )
+        .unwrap();
+        sync_legacy_debrid_stream_preference(&mut blob, "debridStreamSortMode", &json!("SIZE_ASC"))
+            .unwrap();
+
+        let encoded = typed_string(&blob, "debrid_settings", "debrid_stream_preferences").unwrap();
+        let preferences: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(preferences.pointer("/futureRule/keep"), Some(&json!(true)));
+        assert_eq!(
+            preferences.pointer("/requiredVisualTags"),
+            Some(&json!(["AI"]))
+        );
+        assert_eq!(
+            preferences.pointer("/excludedVisualTags"),
+            Some(&json!(["THREE_D", "DV", "DV_ONLY", "HDR_DV"]))
+        );
+        assert_eq!(
+            preferences.pointer("/sortCriteria/0"),
+            Some(&json!({ "key": "SIZE", "direction": "ASC" }))
         );
     }
 }

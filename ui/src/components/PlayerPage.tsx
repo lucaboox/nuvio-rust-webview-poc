@@ -13,6 +13,7 @@ import {
   waitForAutoplayWindow,
 } from "../data/streamAutoplay";
 import { saveBingeGroup } from "../data/bingeGroupCache";
+import { applyDebridStreamSettings } from "../data/debridStreams";
 import { EpisodeBadge } from "./WatchStatus";
 
 type PlayerTrack = { id: number; kind: "audio" | "sub"; title: string; lang: string; selected: boolean };
@@ -57,6 +58,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
   const [nextDismissed, setNextDismissed] = useState(false);
   const [seekBusy, setSeekBusy] = useState(false);
   const [speeding, setSpeeding] = useState(false);
+  const [parentalGuideVisible, setParentalGuideVisible] = useState(false);
   const [pulse, setPulse] = useState<"play" | "pause" | null>(null);
   const client = useClientSettings();
   const confirmedPosition = useRef(0);
@@ -86,6 +88,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
   const pendingMute = useRef<PendingValue<boolean> | null>(null);
   const advanceInFlight = useRef(false);
   const autoAdvancedVideo = useRef<string | null>(null);
+  const autoSelectedTracksFor = useRef<string | null>(null);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -211,12 +214,65 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
     setAdvancing(false);
     advanceInFlight.current = false;
     autoAdvancedVideo.current = null;
+    autoSelectedTracksFor.current = null;
     previewGeneration.current += 1;
     pendingPreviewBucket.current = null;
     previewCache.current.clear();
     previewRef.current = null;
     setPreview(null);
   }, [playback.context.videoId]);
+
+  // Nuvio applies language preferences once, after the stream exposes its
+  // tracks. Keeping this one-shot prevents state polling from undoing a track
+  // the viewer selected manually afterwards.
+  useEffect(() => {
+    if (
+      state.loading ||
+      state.tracks.length === 0 ||
+      autoSelectedTracksFor.current === playback.context.videoId
+    ) return;
+    autoSelectedTracksFor.current = playback.context.videoId;
+
+    const audio = state.tracks.filter((track) => track.kind === "audio");
+    const subtitles = state.tracks.filter((track) => track.kind === "sub");
+    const audioTargets = preferredAudioTargets(settings, playback.context.originalLanguage);
+    if ((settings?.preferredAudioLanguage ?? "device") !== "default") {
+      const preferredAudio = findTrack(audio, audioTargets);
+      if (preferredAudio) command("player.setAudioTrack", { id: preferredAudio.id });
+    }
+
+    const subtitleTargets = preferredSubtitleTargets(settings);
+    const forcedOnly = settings?.subtitleForcedOnly === true || settings?.preferredSubtitleLanguage === "forced";
+    if (forcedOnly) {
+      const selectedAudio = audio.find((track) => track.selected) ?? findTrack(audio, audioTargets);
+      const targets = subtitleTargets.length
+        ? subtitleTargets
+        : selectedAudio?.lang ? [selectedAudio.lang] : audioTargets;
+      const forced = findTrack(subtitles.filter(isForcedTrack), targets);
+      command("player.setSubtitleTrack", { id: forced?.id ?? 0 });
+    } else if (subtitleTargets.length > 0) {
+      const preferredSubtitle = findTrack(subtitles.filter((track) => !isForcedTrack(track)), subtitleTargets);
+      command("player.setSubtitleTrack", { id: preferredSubtitle?.id ?? 0 });
+    } else {
+      // `none` is an instruction, not merely an absent preference.
+      command("player.setSubtitleTrack", { id: 0 });
+    }
+  }, [state.loading, state.tracks, playback.context.videoId, playback.context.originalLanguage, settings, command]);
+
+  useEffect(() => {
+    if (
+      state.loading ||
+      state.error ||
+      settings?.showParentalGuide === false ||
+      !playback.context.ageRating
+    ) {
+      setParentalGuideVisible(false);
+      return;
+    }
+    setParentalGuideVisible(true);
+    const timer = window.setTimeout(() => setParentalGuideVisible(false), 4800);
+    return () => window.clearTimeout(timer);
+  }, [state.loading, state.error, playback.context.videoId, playback.context.ageRating, settings?.showParentalGuide]);
 
   useEffect(() => {
     let live = true;
@@ -361,7 +417,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
         type: playback.context.contentType,
         id: targetId,
       });
-      setSources(result.streams);
+      setSources(applyDebridStreamSettings(result.streams, settings));
     } catch {
       setSources([]);
     }
@@ -417,7 +473,11 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
         id: video.id,
       });
       if (!mounted.current) return;
-      const candidates = autoplayCandidates(result.streams, settings, true);
+      const candidates = autoplayCandidates(
+        applyDebridStreamSettings(result.streams, settings),
+        settings,
+        true,
+      );
       // Nuvio's in-player transition uses the stream that is playing now. The
       // persisted cache is for a later visit to Details, not a substitute for
       // a current stream that supplied no group.
@@ -472,7 +532,10 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
   }, [state.ended, settings?.autoplayNextEpisode, nextEpisode?.id, playback.context.videoId]);
 
   const audioTracks = state.tracks.filter((track) => track.kind === "audio");
-  const subtitleTracks = state.tracks.filter((track) => track.kind === "sub");
+  const subtitleTracks = visibleSubtitleTracks(
+    state.tracks.filter((track) => track.kind === "sub"),
+    settings,
+  );
   const endsAt = endTimeLabel(state);
 
   const PREVIEW_BUCKET_MS = 10_000;
@@ -574,7 +637,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
     command("player.setSpeed", { speed: 1 });
   }
 
-  const covered = state.loading || !!state.error;
+  const covered = !!state.error || (state.loading && settings?.showLoadingOverlay !== false);
   return <div className={`embedded-player-page${amoled ? " amoled" : ""}${covered ? " is-covered" : controlsVisible ? " controls-visible" : " controls-hidden"}`} onPointerMove={revealControls}
     onPointerDown={(event) => { revealControls(); onStagePointerDown(event); }}
     onPointerUp={endSpeeding}
@@ -582,7 +645,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
     onPointerCancel={endSpeeding}
     onContextMenu={(event) => event.preventDefault()}>
     <div className="embedded-player-stage" aria-label="Embedded video surface" />
-    {(state.loading || state.error) && (
+    {((state.loading && settings?.showLoadingOverlay !== false) || state.error) && (
       <div
         className={`player-startup-cover${state.error ? " error" : ""}`}
         style={playback.context.backdrop && !state.error
@@ -622,6 +685,12 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
     {advancing && (
       <div className="player-next-searching" role="status">
         <i className="loading-spinner" /> Finding the next episode source…
+      </div>
+    )}
+    {parentalGuideVisible && (
+      <div className="player-parental-guide" role="status">
+        <span>Rated</span>
+        <strong>{playback.context.ageRating}</strong>
       </div>
     )}
     {pulse && (
@@ -725,7 +794,7 @@ export function PlayerPage({ playback, progress, amoled, settings, onBack, onPla
             onPick={(video) => { setPanel(null); void advanceToEpisode(video); }}
           />
         ) : (
-          <SourceList sources={sources} onPick={playSource} />
+          <SourceList sources={sources} showFileSize={settings?.showFileSizeBadges !== false} onPick={playSource} />
         )}
       </PlayerSidePanel>
     )}
@@ -812,7 +881,7 @@ function EpisodeList({ episodes, contentId, currentId, currentSeason, progress, 
   );
 }
 
-function SourceList({ sources, onPick }: { sources: StreamSource[] | null; onPick(stream: StreamSource): void }) {
+function SourceList({ sources, showFileSize, onPick }: { sources: StreamSource[] | null; showFileSize: boolean; onPick(stream: StreamSource): void }) {
   if (!sources) return <div className="player-panel-loading"><i className="loading-spinner" />Finding sources\u2026</div>;
   if (sources.length === 0) return <div className="player-panel-empty">No sources returned.</div>;
   return (
@@ -820,7 +889,7 @@ function SourceList({ sources, onPick }: { sources: StreamSource[] | null; onPic
       {sources.map((stream, index) => (
         <button key={stream.addonId + ":" + index} disabled={!stream.url && !stream.externalUrl} onClick={() => onPick(stream)}>
           <strong>{firstLine(stream.name) || firstLine(stream.title) || "Source " + (index + 1)}</strong>
-          <span>{stream.addonName}{stream.behaviorHints?.videoSize ? " \u00b7 " + formatBytes(stream.behaviorHints.videoSize) : ""}</span>
+          <span>{stream.addonName}{showFileSize && stream.behaviorHints?.videoSize ? " \u00b7 " + formatBytes(stream.behaviorHints.videoSize) : ""}</span>
         </button>
       ))}
     </div>
@@ -887,6 +956,90 @@ function TrackButton({ icon, label, tracks, open, selectedId, allowOff, onToggle
 function trackLabel(track: PlayerTrack) {
   const parts = [track.title, track.lang && track.lang.toUpperCase()].filter(Boolean);
   return parts.length ? parts.join(" · ") : `Track ${track.id}`;
+}
+
+const LANGUAGE_ALIASES: Record<string, string> = {
+  eng: "en", spa: "es", fre: "fr", fra: "fr", ger: "de", deu: "de",
+  ita: "it", por: "pt", rus: "ru", jpn: "ja", kor: "ko", chi: "zh",
+  zho: "zh", dut: "nl", nld: "nl", swe: "sv", nor: "no", dan: "da",
+  fin: "fi", pol: "pl", tur: "tr", ara: "ar", heb: "he", hin: "hi",
+  und: "", unknown: "",
+};
+
+function normalizeLanguage(value?: string | null): string {
+  const normalized = (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-");
+  return LANGUAGE_ALIASES[normalized] ?? normalized;
+}
+
+function languageMatches(trackLanguage: string | undefined, targetLanguage: string) {
+  const track = normalizeLanguage(trackLanguage);
+  const target = normalizeLanguage(targetLanguage);
+  if (!track || !target) return false;
+  return track === target || track.split("-")[0] === target.split("-")[0];
+}
+
+function deviceLanguageTargets() {
+  return [...new Set((navigator.languages?.length ? navigator.languages : [navigator.language])
+    .map(normalizeLanguage)
+    .filter(Boolean))];
+}
+
+function optionalLanguage(value?: string) {
+  const normalized = normalizeLanguage(value);
+  return normalized && !["none", "default", "device", "original", "forced"].includes(normalized)
+    ? normalized
+    : null;
+}
+
+function preferredAudioTargets(settings?: SettingsSnapshot | null, originalLanguage?: string) {
+  const primary = normalizeLanguage(settings?.preferredAudioLanguage || "device");
+  const secondary = optionalLanguage(settings?.secondaryAudioLanguage);
+  let targets: string[];
+  if (primary === "default") targets = [];
+  else if (primary === "device") targets = deviceLanguageTargets();
+  else if (primary === "original") {
+    const original = optionalLanguage(originalLanguage);
+    targets = original ? [original] : deviceLanguageTargets();
+  } else targets = optionalLanguage(primary) ? [primary] : [];
+  if (secondary) targets.push(secondary);
+  return [...new Set(targets)];
+}
+
+function preferredSubtitleTargets(settings?: SettingsSnapshot | null) {
+  const primary = normalizeLanguage(settings?.preferredSubtitleLanguage || "none");
+  const secondary = optionalLanguage(settings?.secondarySubtitleLanguage);
+  let targets = primary === "device"
+    ? deviceLanguageTargets()
+    : optionalLanguage(primary) ? [primary] : [];
+  if (secondary) targets.push(secondary);
+  return [...new Set(targets)];
+}
+
+function findTrack(tracks: PlayerTrack[], targets: string[]) {
+  for (const target of targets) {
+    const match = tracks.find((track) =>
+      languageMatches(track.lang, target) || languageMatches(track.title, target));
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function isForcedTrack(track: PlayerTrack) {
+  const text = `${track.title} ${track.lang}`.toLowerCase();
+  return normalizeLanguage(track.lang) === "forced" || text.includes("forced") || (text.includes("songs") && text.includes("sign"));
+}
+
+function visibleSubtitleTracks(tracks: PlayerTrack[], settings?: SettingsSnapshot | null) {
+  let visible = settings?.subtitleForcedOnly ? tracks.filter(isForcedTrack) : tracks;
+  if (!settings?.subtitlePreferredLanguagesOnly) return visible;
+  const targets = preferredSubtitleTargets(settings);
+  if (targets.length === 0) return [];
+  visible = visible.filter((track) => targets.some((target) =>
+    languageMatches(track.lang, target) || languageMatches(track.title, target)));
+  return visible;
 }
 
 /** Wall-clock time the title finishes, from the remaining runtime. */

@@ -23,6 +23,28 @@ pub struct SubtitleStyle {
     pub use_libass: bool,
 }
 
+/// The four picture modes exposed by Nuvio. The Windows implementation maps
+/// these to the same libmpv properties as the official desktop bridge.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ResizeMode {
+    #[default]
+    Fit,
+    Fill,
+    Zoom,
+    Stretch,
+}
+
+impl ResizeMode {
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "Fill" => Self::Fill,
+            "Zoom" => Self::Zoom,
+            "Stretch" => Self::Stretch,
+            _ => Self::Fit,
+        }
+    }
+}
+
 impl Default for SubtitleStyle {
     fn default() -> Self {
         // Matches Nuvio's SubtitleStyleState.DEFAULT.
@@ -135,6 +157,7 @@ impl PlayerService {
         request_headers: Vec<String>,
         start_position_ms: i64,
         subtitle_style: SubtitleStyle,
+        resize_mode: ResizeMode,
         rtx_super_resolution: bool,
         on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
@@ -184,6 +207,7 @@ impl PlayerService {
                 request_headers,
                 start_position_ms,
                 subtitle_style,
+                resize_mode,
                 rtx_super_resolution,
                 Arc::clone(&self.state),
                 on_progress,

@@ -4,7 +4,7 @@ use std::{
     ptr,
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,7 +14,21 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
 };
 
-use super::{PlayerState, PlayerTrack, SubtitleStyle};
+use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle};
+
+const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
+
+fn should_emit_progress_checkpoint(
+    elapsed: Duration,
+    pause_checkpoint_pending: bool,
+    paused: bool,
+    position_ms: i64,
+    duration_ms: i64,
+) -> bool {
+    position_ms > 0
+        && duration_ms > 0
+        && (pause_checkpoint_pending || (!paused && elapsed >= PROGRESS_CHECKPOINT_INTERVAL))
+}
 
 #[derive(Clone, Debug)]
 pub enum PlayerCommand {
@@ -176,6 +190,7 @@ pub fn launch(
     request_headers: Vec<String>,
     start_position_ms: i64,
     subtitle_style: SubtitleStyle,
+    resize_mode: ResizeMode,
     rtx_super_resolution: bool,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
@@ -192,6 +207,7 @@ pub fn launch(
                 &request_headers,
                 start_position_ms,
                 &subtitle_style,
+                resize_mode,
                 rtx_super_resolution,
                 &state,
                 player_commands,
@@ -245,6 +261,7 @@ fn run_player(
     request_headers: &[String],
     start_position_ms: i64,
     subtitle_style: &SubtitleStyle,
+    resize_mode: ResizeMode,
     rtx_super_resolution: bool,
     state: &Arc<Mutex<PlayerState>>,
     commands: PlayerCommands,
@@ -288,13 +305,17 @@ fn run_player(
         )?;
         set_option(mpv_set_option_string, handle, "input-vo-keyboard", "no")?;
         set_option(mpv_set_option_string, handle, "keep-open", "yes")?;
-        // Keep the source's display aspect ratio inside the exact viewport sent by
-        // the WebView. These are explicit so a user mpv.conf or stale runtime
-        // property can never stretch/crop the embedded picture.
-        set_option(mpv_set_option_string, handle, "keepaspect", "yes")?;
+        // This is deliberately identical to Nuvio's Windows player_bridge.cpp.
+        // Its desktop bridge currently treats Fill and Zoom the same way.
+        let (keep_aspect, panscan) = match resize_mode {
+            ResizeMode::Fit => ("yes", "0.0"),
+            ResizeMode::Fill | ResizeMode::Zoom => ("yes", "1.0"),
+            ResizeMode::Stretch => ("no", "0.0"),
+        };
+        set_option(mpv_set_option_string, handle, "keepaspect", keep_aspect)?;
         set_option(mpv_set_option_string, handle, "keepaspect-window", "no")?;
         set_option(mpv_set_option_string, handle, "video-aspect-override", "no")?;
-        set_option(mpv_set_option_string, handle, "panscan", "0")?;
+        set_option(mpv_set_option_string, handle, "panscan", panscan)?;
         set_option(mpv_set_option_string, handle, "video-unscaled", "no")?;
         set_option(mpv_set_option_string, handle, "video-zoom", "0")?;
         set_option(mpv_set_option_string, handle, "video-align-x", "0")?;
@@ -374,6 +395,10 @@ fn run_player(
         let mut position = start_position_ms as f64 / 1000.0;
         let mut duration = 0.0f64;
         let mut sample_tick = 0u32;
+        let mut last_progress_checkpoint = Instant::now();
+        let mut checkpoint_clock_started = false;
+        let mut was_paused = false;
+        let mut pause_checkpoint_pending = false;
         let mut stopped = false;
         let mut reached_eof = false;
         let mut track_count = -1i64;
@@ -517,11 +542,44 @@ fn run_player(
                         _ => track.id == subtitle_id,
                     };
                 }
+                let is_paused = paused != 0;
+                if is_paused && !was_paused {
+                    pause_checkpoint_pending = true;
+                } else if !is_paused {
+                    // A pause that ended before mpv reported a valid duration
+                    // no longer needs a delayed pause checkpoint.
+                    pause_checkpoint_pending = false;
+                }
+                let position_ms = (position * 1000.0) as i64;
+                let duration_ms = (duration * 1000.0) as i64;
+                let now = Instant::now();
+                if !checkpoint_clock_started && position_ms > 0 && duration_ms > 0 {
+                    last_progress_checkpoint = now;
+                    checkpoint_clock_started = true;
+                }
+                if should_emit_progress_checkpoint(
+                    now.duration_since(last_progress_checkpoint),
+                    pause_checkpoint_pending,
+                    is_paused,
+                    position_ms,
+                    duration_ms,
+                ) {
+                    // The callback only appends to an in-memory channel. HTTP
+                    // sync runs on the named progress worker in ipc.rs.
+                    on_progress(position_ms, duration_ms, false);
+                    last_progress_checkpoint = now;
+                    pause_checkpoint_pending = false;
+                } else if is_paused {
+                    // Paused wall-clock time does not count toward the next
+                    // fifteen seconds of active-playback checkpointing.
+                    last_progress_checkpoint = now;
+                }
+                was_paused = is_paused;
                 if let Ok(mut current) = state.lock() {
                     current.active = true;
-                    current.paused = paused != 0;
-                    current.position_ms = (position * 1000.0) as i64;
-                    current.duration_ms = (duration * 1000.0) as i64;
+                    current.paused = is_paused;
+                    current.position_ms = position_ms;
+                    current.duration_ms = duration_ms;
                     current.volume = volume.round() as i64;
                     current.muted = muted != 0;
                     current.audio_track = audio_id;
@@ -531,9 +589,9 @@ fn run_player(
             }
             thread::sleep(Duration::from_millis(15));
         }
-        // Release the native decoder/window before any remote progress sync.
-        // The sync callback can take seconds on a bad network and must not hold
-        // up a replacement player or application shutdown.
+        // Release the native decoder/window before the final enqueue. The
+        // callback is nonblocking and dropping it closes the reporter channel;
+        // the worker drains the final EOF checkpoint before exiting.
         drop(handle_guard);
         if let Ok(mut current) = state.lock() {
             current.active = false;
@@ -542,9 +600,7 @@ fn run_player(
         if position > 0.0 && duration > 0.0 {
             let position_ms = (position * 1000.0) as i64;
             let duration_ms = (duration * 1000.0) as i64;
-            let _ = thread::Builder::new()
-                .name("nuvio-progress-sync".to_string())
-                .spawn(move || on_progress(position_ms, duration_ms, reached_eof));
+            on_progress(position_ms, duration_ms, reached_eof);
         }
         Ok(())
     }
@@ -872,5 +928,44 @@ mod tests {
             video_pipeline_options(false),
             &[("gpu-api", "auto"), ("hwdec", "auto")]
         );
+    }
+
+    #[test]
+    fn progress_checkpoints_are_periodic_and_pause_aware() {
+        assert!(!should_emit_progress_checkpoint(
+            Duration::from_secs(14),
+            false,
+            false,
+            14_000,
+            60_000,
+        ));
+        assert!(should_emit_progress_checkpoint(
+            Duration::from_secs(15),
+            false,
+            false,
+            15_000,
+            60_000,
+        ));
+        assert!(should_emit_progress_checkpoint(
+            Duration::ZERO,
+            true,
+            true,
+            15_000,
+            60_000,
+        ));
+        assert!(!should_emit_progress_checkpoint(
+            Duration::from_secs(60),
+            false,
+            true,
+            15_000,
+            60_000,
+        ));
+        assert!(!should_emit_progress_checkpoint(
+            Duration::from_secs(60),
+            true,
+            true,
+            0,
+            60_000,
+        ));
     }
 }
