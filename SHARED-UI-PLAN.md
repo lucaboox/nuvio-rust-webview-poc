@@ -6,8 +6,31 @@ keeps the things only a desktop can do.
 Nothing has been ported yet. This is the design, written while the two
 codebases were fresh, so the work does not start by rediscovering it.
 
-Step 1 is done: the web client has the capability layer, in `src/platform/`,
-with `downloads` and `debrid` absent. Nothing about the web build changed.
+Steps 1 and 2 are done. The web client has the capability layer in
+`src/platform/`, and this shell renders that UI: signed in, catalogs loading,
+nothing about the web build changed.
+
+Two things the plan did not anticipate, both now settled:
+
+- **The network is a capability too.** The data layer was the whole of the
+  difference, not just auth and storage — twelve `fetch` calls here against
+  eighty `invoke` calls there, and a CSP allowing `connect-src ipc:` alone.
+  `platform.request` is answered by `fetch` in a browser and by Rust here.
+- **Auth was decided in favour of the shell.** A browser hides the token in a
+  Worker; this keeps it outside the webview entirely, which is the same promise
+  kept somewhere stronger. `auth.request` names a path, the shell signs it, and
+  no token crosses back.
+
+The substitution is a build-time alias — `NUVIO_PLATFORM_MODULE` points at
+`shell-ui/platform.ts` — so the submodule stays pristine and exactly one file
+differs per shell, as intended.
+
+A warning worth keeping, since it cost two rounds of blaming the wrong thing:
+the service worker really must not be ported. It precaches the app and waits to
+be prompted before updating, so once registered in the webview it went on
+serving its own copy and every later change appeared not to apply. It is
+disabled for shell builds now, but an already-registered worker survives that
+and has to be cleared from the webview profile by hand.
 
 ## Why this is possible at all
 
