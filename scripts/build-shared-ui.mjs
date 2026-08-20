@@ -12,7 +12,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,10 +38,49 @@ if (!existsSync(join(sharedUi, "node_modules"))) {
   if (install.status !== 0) process.exit(install.status ?? 1);
 }
 
+/**
+ * The account backend, which the UI compiles in rather than discovers.
+ *
+ * `.env.local` is not in the submodule and should not be — it holds this
+ * installation's backend, not the shared UI's. Without it the bundle is built
+ * with an empty backend and the app reports having none to sign into, which
+ * looks like broken auth rather than missing configuration.
+ *
+ * Read from this repository's own `.env.local`, so the shell is configured
+ * where the shell lives.
+ */
+const BACKEND_KEYS = [
+  "NUVIO_SUPABASE_URL",
+  "NUVIO_SUPABASE_FALLBACK_URL",
+  "NUVIO_SUPABASE_ANON_KEY",
+];
+
+function backendEnv() {
+  const file = join(root, ".env.local");
+  const found = {};
+  if (existsSync(file)) {
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      const match = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (match) found[match[1]] = match[2].replace(/^["']|["']$/g, "");
+    }
+  }
+  for (const key of BACKEND_KEYS)
+    if (!found[key] && process.env[key]) found[key] = process.env[key];
+
+  if (!found.NUVIO_SUPABASE_URL || !found.NUVIO_SUPABASE_ANON_KEY) {
+    console.warn(
+      `\nNo account backend configured. Create ${file} with:\n` +
+        BACKEND_KEYS.map((key) => `  ${key}=…`).join("\n") +
+        "\nBuilding anyway — the app will report having no backend to sign in to.\n",
+    );
+  }
+  return found;
+}
+
 const build = spawnSync("npx", ["vite", "build"], {
   cwd: sharedUi,
   stdio: "inherit",
   shell: true,
-  env: { ...process.env, NUVIO_PLATFORM_MODULE: platformModule },
+  env: { ...process.env, ...backendEnv(), NUVIO_PLATFORM_MODULE: platformModule },
 });
 process.exit(build.status ?? 1);
