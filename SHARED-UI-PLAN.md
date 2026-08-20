@@ -103,7 +103,17 @@ Each step should end with something that runs.
    storage to need the shell's versions.
 3. **Reattach downloads** through `platform.downloads`. The existing
    `DownloadsPage` moves across mostly intact.
-4. **Delete `ui/`'s duplicates** only once their replacements work.
+4. **Delete `ui/`'s duplicates** only once their replacements work. Checked
+   before attempting it: of the nineteen modules in `ui/src/data`, four share a
+   name with a shared-UI counterpart and the rest do not. Some are the same
+   thing renamed — `continueWatching` against `progress`, `seriesProgress`
+   against `seriesPlayback`, `bingeGroupCache` against `bingeCache` — but
+   `debridStreams`, `settingsRegistry` and `integrationSettings` have no
+   counterpart at all, because the capabilities they belong to are still
+   absent. Deleting the tree wholesale would take the Debrid filtering rules
+   and the settings registry with it, along with fourteen passing tests. The
+   word in this step is *duplicates*, and it has to be honoured module by
+   module rather than by removing the folder.
 5. **Settings last.** `settingsRegistry.ts` is data-driven, so the registry
    becomes the shared one plus desktop entries the capability layer adds.
 
