@@ -699,6 +699,33 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
             )
         }
         "auth.state" => success(id, account_payload(state, None)),
+        // The shared UI's `auth.request`: it names a path, the shell signs and
+        // sends it. No token crosses back.
+        "auth.request" => {
+            let path = string_param(&request.params, "path").unwrap_or_default().to_string();
+            let init = request.params.get("init").cloned().unwrap_or_else(|| json!({}));
+            let method = init
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("GET")
+                .to_string();
+            let body = init.get("body").and_then(Value::as_str).map(str::to_string);
+            let headers = init
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(name, value)| {
+                            value.as_str().map(|text| (name.clone(), text.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            match state.auth.authorized_request(&path, &method, body, headers) {
+                Ok(value) => success(id, value),
+                Err(error) => failure(id, "account_request_failed", error.to_string()),
+            }
+        }
         "auth.configureBackend" => {
             let self_hosted = request.params.get("selfHosted").and_then(Value::as_bool);
             match self_hosted {

@@ -21,6 +21,10 @@ import {
 } from "../shared-ui/src/lib/externalPlayer.ts";
 import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
 import type {
+  BackendConfig,
+  Session,
+} from "../shared-ui/src/types.ts";
+import type {
   DownloadItem,
   DownloadRequest,
   DownloadsSnapshot,
@@ -68,7 +72,36 @@ const downloads = {
     invoke<unknown>("downloads.moveStorage", { path }).then(() => undefined),
 };
 
+/**
+ * The session lives in the shell, not in the page.
+ *
+ * The browser keeps it in a Worker so the page cannot read the token. Here it
+ * never enters the webview at all — the same promise kept somewhere stronger,
+ * because there is no JavaScript context that could reach it even in
+ * principle. What crosses the bridge is a path and a body; the shell signs.
+ */
+const auth = {
+  signIn: (backend: BackendConfig, email: string, password: string) =>
+    invoke<unknown>("auth.configureBackend", {
+      url: backend.url,
+      key: backend.key,
+      selfHosted: backend.selfHosted,
+    }).then(() => invoke<Session>("auth.signIn", { email, password })),
+  restore: () => invoke<Session>("auth.state"),
+  signOut: () => invoke<unknown>("auth.signOut").then(() => undefined),
+  request: <T>(
+    path: string,
+    init: { method?: string; body?: string; headers?: Record<string, string> } = {},
+  ) => invoke<T>("auth.request", { path, init }),
+  // The shell's session outlives the page: a reload finds it still signed in,
+  // and there is no worker here to crash out from under us. Nothing to
+  // announce, so this registers a listener that is never called rather than
+  // pretending the event cannot exist.
+  onSessionLost: () => () => undefined,
+};
+
 export const platform: Platform = {
+  auth,
   downloads,
   // Absent until the resolver is ported. The contract exists, the shell's
   // credentials do too, but nothing on either client turns a cached link into

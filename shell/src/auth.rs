@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     path::PathBuf,
     sync::{
@@ -709,6 +710,58 @@ impl AuthService {
                     ("order", "sort_order.asc".to_string()),
                 ])
                 .send()
+        })
+    }
+
+    /// One authorized account call, made on the UI's behalf.
+    ///
+    /// This is the shell's half of the shared UI's `auth.request`. The web
+    /// client keeps its session in a Worker so the page never holds a token;
+    /// here the token never enters the webview at all, which is the same
+    /// promise kept somewhere stronger. What crosses the bridge is a path and a
+    /// body — never a credential — so the UI cannot leak one it was never
+    /// given.
+    ///
+    /// Paths are the account backend's own, and are refused unless they are
+    /// relative: a caller that could pass an absolute URL could point this at
+    /// any host and have it sign the request with the viewer's token.
+    pub fn authorized_request(
+        &self,
+        path: &str,
+        method: &str,
+        body: Option<String>,
+        headers: HashMap<String, String>,
+    ) -> Result<Value> {
+        if !path.starts_with('/') || path.starts_with("//") {
+            return Err(anyhow::anyhow!(
+                "Account request paths must be relative to the backend."
+            ));
+        }
+        let method = method.trim().to_ascii_uppercase();
+        self.authorized_json(path, |client, url, config, token| {
+            let mut builder = match method.as_str() {
+                "POST" => client.post(url),
+                "PATCH" => client.patch(url),
+                "DELETE" => client.delete(url),
+                _ => client.get(url),
+            }
+            .header("apikey", &config.anon_key)
+            .bearer_auth(token);
+            // The caller's headers are the PostgREST ones the shared UI already
+            // sends — Prefer, Content-Type, Range. Authorization and apikey are
+            // set above and deliberately not overridable from the page.
+            for (name, value) in &headers {
+                if name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("apikey")
+                {
+                    continue;
+                }
+                builder = builder.header(name, value);
+            }
+            if let Some(body) = body.clone() {
+                builder = builder.header("content-type", "application/json").body(body);
+            }
+            builder.send()
         })
     }
 
