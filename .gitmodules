@@ -1,0 +1,4 @@
+[submodule "shared-ui"]
+	path = shared-ui
+	url = https://github.com/lucaboox/nuvio-web.git
+	branch = feat/shared-web-ui

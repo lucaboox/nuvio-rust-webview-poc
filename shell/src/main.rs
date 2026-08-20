@@ -6,6 +6,7 @@ mod collections;
 mod content;
 mod downloads;
 mod home_layout;
+mod http;
 mod ipc;
 mod library;
 mod metadata;

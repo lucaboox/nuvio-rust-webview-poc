@@ -674,6 +674,19 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     .collect::<Vec<_>>(),
             }),
         ),
+        // The shared UI's `platform.request`. Stateless, so it sits with the
+        // other calls that need nothing but their parameters.
+        "http.request" => match serde_json::from_value::<crate::http::HttpRequest>(
+            request.params.clone(),
+        ) {
+            Ok(input) => match crate::http::request(input) {
+                Ok(response) => success(id, json!(response)),
+                // A host that refused is reported through the response, not
+                // here: only a request that never completed is an error.
+                Err(error) => failure(id, "request_failed", error.to_string()),
+            },
+            Err(error) => failure(id, "request_invalid", error.to_string()),
+        },
         "ui.ping" => {
             state.ping_count += 1;
             success(
