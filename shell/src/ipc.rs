@@ -764,6 +764,25 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                 .map(|error| error.to_string());
             success(id, account_payload(state, warning))
         }
+        // `auth.state` reports a session; it does not restore one. The old UI
+        // got restoration as a side effect of `app.bootstrap` at startup, which
+        // the shared UI never calls — so a relaunch reached for profiles with
+        // no session behind them and was told to sign in first.
+        "auth.restore" => match state.auth.restore_session() {
+            Ok(true) => {
+                let warning = state
+                    .refresh_account_data()
+                    .err()
+                    .map(|error| error.to_string());
+                success(id, account_payload(state, warning))
+            }
+            Ok(false) => failure(
+                id,
+                "no_session",
+                "No stored session to restore".to_string(),
+            ),
+            Err(error) => failure(id, "auth_failed", error.to_string()),
+        },
         "auth.signIn" => {
             let credentials = credentials(&request.params);
             match credentials.and_then(|(email, password)| state.auth.sign_in(email, password)) {

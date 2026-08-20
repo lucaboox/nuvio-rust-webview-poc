@@ -87,7 +87,10 @@ const auth = {
       key: backend.key,
       selfHosted: backend.selfHosted,
     }).then(() => invoke<Session>("auth.signIn", { email, password })),
-  restore: () => invoke<Session>("auth.state"),
+  // Restores rather than reports. `auth.state` answers with whatever session
+  // is loaded, which on a fresh launch is none — the shell has to be asked to
+  // rotate the stored credential first.
+  restore: () => invoke<Session>("auth.restore"),
   signOut: () => invoke<unknown>("auth.signOut").then(() => undefined),
   request: <T>(
     path: string,
