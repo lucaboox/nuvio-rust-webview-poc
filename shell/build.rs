@@ -1,8 +1,12 @@
 fn main() {
-    // `tauri::generate_context!` bakes ui/dist into the binary at compile time,
-    // but cargo does not track files a proc macro reads. Without this,
+    // `tauri::generate_context!` bakes the frontend into the binary at compile
+    // time, but cargo does not track files a proc macro reads. Without this,
     // rebuilding after a UI-only change can silently ship the previous bundle.
-    println!("cargo:rerun-if-changed=../ui/dist");
+    //
+    // This has to name whatever `frontendDist` points at. It went on watching
+    // ../ui/dist after the shell moved to the shared UI, so a rebuild embedded
+    // the old bundle and every UI change appeared to do nothing.
+    println!("cargo:rerun-if-changed=../shared-ui/dist");
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=../.env.local");
     // Supabase's anon key is a public client credential. Embed the same
