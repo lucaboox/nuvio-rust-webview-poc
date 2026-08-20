@@ -114,7 +114,32 @@ Each step should end with something that runs.
    and the settings registry with it, along with fourteen passing tests. The
    word in this step is *duplicates*, and it has to be honoured module by
    module rather than by removing the folder.
-5. **Settings last.** `settingsRegistry.ts` is data-driven, so the registry
+5. **The player, in the window.** `platform.player` currently hands a URL to
+   libmpv and libmpv takes over — one call, no ongoing relationship. Seamless
+   playback means the shared player's chrome driving a native backend, and the
+   order matters:
+
+   - **Settle the compositing first, in Rust, with something throwaway.** libmpv
+     renders to its own surface. Putting it *inside* the window means either a
+     transparent region the UI draws over or rendering into a texture the
+     webview composites. If neither works cleanly on Windows the whole design
+     changes, and finding that out after refactoring the player would be
+     expensive. This is the only real risk here; everything below is known work.
+   - **Then make state flow outward.** Today the UI asks and the shell answers.
+     A player surface needs a subscription — position, duration, buffering,
+     track changes, pushed as they happen. `player.stateChanged` exists for
+     exactly this and nothing consumes it.
+   - **Then adapt `Player.tsx`.** Thirteen hundred lines built around an
+     `HTMLVideoElement`: `currentTime`, `play()`, `pause()`, the HLS.js
+     attachment, the mediabunny remux fallback. Everything touching the element
+     becomes a call through the capability. The chrome above it — scrubber,
+     track menus, skip button — should not have to change at all, and if it does,
+     the contract is wrong.
+
+   The shell already has eighteen `player.*` methods. What is missing is not
+   capability but shape.
+
+6. **Settings last.** `settingsRegistry.ts` is data-driven, so the registry
    becomes the shared one plus desktop entries the capability layer adds.
 
 ## Two things to check early, before committing to the plan
