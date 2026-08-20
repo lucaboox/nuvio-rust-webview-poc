@@ -4,10 +4,10 @@
   "version": "0.1.0-alpha.5",
   "identifier": "tv.nuvio.rust-webview-poc",
   "build": {
-    "frontendDist": "../ui/dist",
+    "frontendDist": "../shared-ui/dist",
     "beforeBuildCommand": {
       "cwd": "..",
-      "script": "npm run prepare:runtime && npm run build:ui"
+      "script": "npm run prepare:runtime && npm run build:shared-ui"
     }
   },
   "app": {

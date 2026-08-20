@@ -36,7 +36,7 @@ if errorlevel 1 goto :failed
 
 echo.
 echo [2/3] UI bundle
-call npm run build:ui
+call npm run build:shared-ui
 if errorlevel 1 goto :failed
 
 echo.

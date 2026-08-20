@@ -1,0 +1,98 @@
+/**
+ * The desktop shell, as the shared UI meets it.
+ *
+ * This is the file the plan says differs per shell, and it is the only one: the
+ * web client's `src/platform/index.ts` is aliased to this at build time, so
+ * every module above it goes on importing `platform` and never learns which
+ * client it got.
+ *
+ * It lives here rather than in the submodule on purpose. `shared-ui` is a
+ * pinned checkout of another repository, and a shell that edited it would
+ * dirty the submodule and lose the change on the next update.
+ */
+
+import { invoke } from "../ui/src/bridge/nativeBridge";
+import {
+  copyStreamUrl,
+  externalPlayerLabel,
+  externalPlayerOptions,
+  isExternalPlayerAvailable,
+  launchExternalPlayer,
+} from "../shared-ui/src/lib/externalPlayer.ts";
+import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
+import type {
+  DownloadItem,
+  DownloadRequest,
+  DownloadsSnapshot,
+  Platform,
+  RequestOptions,
+  RequestResponse,
+} from "../shared-ui/src/platform/types.ts";
+
+export type * from "../shared-ui/src/platform/types.ts";
+
+/**
+ * HTTP by way of Rust, because the webview cannot do it itself.
+ *
+ * The CSP here allows `connect-src ipc:` and nothing else, which is what keeps
+ * an installed addon from having a browser context inside the desktop app. The
+ * shell dials instead, and enforces the timeout, the size cap and the scheme
+ * rules on its side of the hop.
+ */
+const request = (url: string, options: RequestOptions = {}) =>
+  invoke<RequestResponse>("http.request", {
+    url,
+    method: options.method,
+    headers: options.headers,
+    body: options.body,
+    timeoutMs: options.timeoutMs,
+    maxBytes: options.maxBytes,
+  });
+
+/** Shapes the queue's own snapshot into what the shared contract promises. */
+const downloads = {
+  list: () => invoke<DownloadsSnapshot>("downloads.list"),
+  enqueue: (item: DownloadRequest) =>
+    invoke<{ item: DownloadItem }>("downloads.enqueue", { request: item }).then(
+      () => undefined,
+    ),
+  cancel: (id: string) => invoke<unknown>("downloads.cancel", { id }).then(() => undefined),
+  retry: (id: string) => invoke<unknown>("downloads.retry", { id }).then(() => undefined),
+  remove: (id: string) => invoke<unknown>("downloads.remove", { id }).then(() => undefined),
+  artwork: (id: string) =>
+    invoke<{ image?: string }>("downloads.artwork", { id }).then(
+      (result) => result.image ?? null,
+    ),
+  openFolder: () => invoke<unknown>("downloads.openFolder").then(() => undefined),
+  moveStorage: (path: string) =>
+    invoke<unknown>("downloads.moveStorage", { path }).then(() => undefined),
+};
+
+export const platform: Platform = {
+  downloads,
+  // Absent until the resolver is ported. The contract exists, the shell's
+  // credentials do too, but nothing on either client turns a cached link into
+  // a playable URL yet — so the UI should go on rendering as though it cannot,
+  // because it cannot.
+  request,
+  // The webview has IndexedDB like any other, so the browser's implementation
+  // is reused rather than reimplemented over the bridge. What belongs in files
+  // is machine-level configuration, which `settings.rs` already owns and which
+  // does not come through this contract.
+  storage: {
+    get: getValue,
+    set: setValue,
+    remove: deleteValue,
+  },
+  // Reused for now, and only partly right: these launch by URL scheme, which a
+  // webview answers differently from a browser tab. What a desktop shell should
+  // do instead is ask the operating system what is installed — that belongs in
+  // Rust, and replaces this wholesale rather than patching it.
+  externalPlayer: {
+    options: externalPlayerOptions,
+    label: externalPlayerLabel,
+    isAvailable: isExternalPlayerAvailable,
+    launch: launchExternalPlayer,
+    copyUrl: copyStreamUrl,
+  },
+};
