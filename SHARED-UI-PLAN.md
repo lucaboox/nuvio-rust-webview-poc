@@ -144,6 +144,31 @@ Each step should end with something that runs.
    going over the bridge instead of to an `HTMLVideoElement`, and the
    `player-active` class on while it is up. No architectural unknown remains.
 
+   **The mechanism, read out of the Rust rather than guessed at.** mpv renders
+   into the *same* HWND as WebView2 — `native.rs` says so outright: "a separate
+   sibling video HWND cannot show through a windowed WebView2 surface". The
+   handle is supplied once at startup by `configure_window` from `main.rs`, and
+   `prepare` refuses to run without it. So there is no surface to attach and no
+   ordering to get right: the video is always behind the page, and the only
+   question is whether the page paints over it.
+
+   **Which is why the second attempt showed nothing.** Making `html`, `body`
+   and `#root` transparent is what the old UI needed, because its layout put no
+   background anywhere else. The shared UI does — `body, #root` at line 18, and
+   more on the layout containers inside it. Chasing those selector by selector
+   is how this fails a third time.
+
+   The robust rule is to stop rendering the app instead of trying to see
+   through it: with the overlay as a direct child of the root, everything else
+   under it gets `display: none` while the class is on. Nothing to hunt, and it
+   cannot be defeated by a background added later. That requires the overlay to
+   actually be a root-level child, which in `App.tsx` it currently is not.
+
+   Stremio arrived at this same architecture — `stremio-shell-ng` is Rust,
+   WebView2 and mpv rendering direct to the window, replacing their Qt shell
+   for 2-5x the efficiency. Worth reading if the layering ever needs changing,
+   though not for this: the layering here already works.
+
    Two mistakes already made here, both worth not repeating. `prepare` was
    wired up as though it opened its own window, which sent every stream to a
    surface nothing rendered and made clicking a source do nothing at all. And
