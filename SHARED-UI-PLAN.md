@@ -114,30 +114,41 @@ Each step should end with something that runs.
    and the settings registry with it, along with fourteen passing tests. The
    word in this step is *duplicates*, and it has to be honoured module by
    module rather than by removing the folder.
-5. **The player, in the window.** `platform.player` currently hands a URL to
-   libmpv and libmpv takes over — one call, no ongoing relationship. Seamless
-   playback means the shared player's chrome driving a native backend, and the
-   order matters:
+5. **The player, in the window.** The risk this step was flagged for turned out
+   not to exist: the shell already composites libmpv into its own window, and
+   the mechanism is four lines rather than a windowing project. What follows is
+   the whole of it, read out of `ui/`'s `PlayerPage` and `styles/app.css`
+   before that tree is deleted, because it is not obvious from either the Rust
+   or the bridge.
 
-   - **Settle the compositing first, in Rust, with something throwaway.** libmpv
-     renders to its own surface. Putting it *inside* the window means either a
-     transparent region the UI draws over or rendering into a texture the
-     webview composites. If neither works cleanly on Windows the whole design
-     changes, and finding that out after refactoring the player would be
-     expensive. This is the only real risk here; everything below is known work.
-   - **Then make state flow outward.** Today the UI asks and the shell answers.
-     A player surface needs a subscription — position, duration, buffering,
-     track changes, pushed as they happen. `player.stateChanged` exists for
-     exactly this and nothing consumes it.
-   - **Then adapt `Player.tsx`.** Thirteen hundred lines built around an
-     `HTMLVideoElement`: `currentTime`, `play()`, `pause()`, the HLS.js
-     attachment, the mediabunny remux fallback. Everything touching the element
-     becomes a call through the capability. The chrome above it — scrubber,
-     track menus, skip button — should not have to change at all, and if it does,
-     the contract is wrong.
+   - **mpv renders behind the webview, always.** It is revealed by making the
+     page transparent, not by moving anything: `html.player-active,
+     body.player-active, body.player-active #root { background: transparent
+     !important }`. Add the class to play, remove it to stop. That is the
+     entire compositing story.
+   - **`player.prepare` starts playback into that surface.** It does not open a
+     window. Its parameters are `mediaId`, `url`, `externalUrl`,
+     `requestHeaders`, `startPositionMs` and a `progress` object carrying
+     contentId, contentType, videoId and season — the last is how the shell
+     attributes watch progress, and omitting it loses that silently.
+   - **State is polled, not pushed.** `PlayerPage` reads `player.state`; it
+     never subscribes. `player.stateChanged` exists but nothing consumes it, so
+     polling is the proven path and a subscription is an improvement, not a
+     prerequisite.
+   - **Controls are already there**: togglePause, seek, seekRelative, setVolume,
+     toggleMute, cycleAudio, cycleSubtitle, setSpeed, setAudioTrack,
+     setSubtitleTrack, stop, plus thumbnail and skipSegments.
 
-   The shell already has eighteen `player.*` methods. What is missing is not
-   capability but shape.
+   So the work is to widen `PlayerApi` past the handoff to cover those, and to
+   give the shared `Player.tsx` a native mode: same chrome, transport calls
+   going over the bridge instead of to an `HTMLVideoElement`, and the
+   `player-active` class on while it is up. No architectural unknown remains.
+
+   Two mistakes already made here, both worth not repeating. `prepare` was
+   wired up as though it opened its own window, which sent every stream to a
+   surface nothing rendered and made clicking a source do nothing at all. And
+   `void`-ing the promise meant the failure was silent — if a capability call
+   can reject, something has to say so.
 
 6. **Settings last.** `settingsRegistry.ts` is data-driven, so the registry
    becomes the shared one plus desktop entries the capability layer adds.
