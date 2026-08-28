@@ -3,6 +3,29 @@
 Plan for `feat/shared-web-ui`: the Rust client renders the Nuvio Web UI, and
 keeps the things only a desktop can do.
 
+## Checkout and build discipline
+
+There are **two working checkouts of the same `nuvio-web` repository**:
+
+- `../Web-Version` is the standalone checkout.
+- `shared-ui` is the desktop repository's Git submodule.
+
+They can point at the same branch and commit while still being separate working
+directories. A change made in one is not visible in the other. Edit only one
+checkout, commit and push it, then pull or update the other checkout. Never make
+the same change independently in both directories.
+
+Shared UI work belongs on `feat/shared-web-ui` and must be committed and pushed.
+Do not leave changes uncommitted in the submodule: `git submodule update` can
+silently discard them while moving the submodule back to the commit recorded by
+the desktop repository.
+
+The desktop application embeds the shared UI at compile time. After changing
+the UI, rebuild the shared bundle and relink the Rust binary before testing it.
+Close the running desktop application first because Cargo cannot replace a
+running executable on Windows; otherwise it is easy to launch and test the old
+binary while believing the new UI was included.
+
 Nothing has been ported yet. This is the design, written while the two
 codebases were fresh, so the work does not start by rediscovering it.
 
