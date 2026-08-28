@@ -12,13 +12,7 @@
  */
 
 import { invoke } from "./bridge.ts";
-import {
-  copyStreamUrl,
-  externalPlayerLabel,
-  externalPlayerOptions,
-  isExternalPlayerAvailable,
-  launchExternalPlayer,
-} from "../shared-ui/src/lib/externalPlayer.ts";
+import { copyStreamUrl } from "../shared-ui/src/lib/externalPlayer.ts";
 import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
 import type {
   BackendConfig,
@@ -30,6 +24,7 @@ import type {
   DownloadsSnapshot,
   Platform,
   PlayerSource,
+  PlayerState,
   RequestOptions,
   RequestResponse,
 } from "../shared-ui/src/platform/types.ts";
@@ -115,6 +110,7 @@ const player = {
   open: (source: PlayerSource) =>
     invoke<unknown>("player.prepare", {
       url: source.url,
+      externalUrl: source.externalUrl,
       mediaId: source.mediaId,
       startPositionMs: source.startPositionMs ?? 0,
       requestHeaders: source.requestHeaders ?? {},
@@ -122,6 +118,23 @@ const player = {
       // the history does not.
       progress: source.progress,
     }).then(() => undefined),
+  state: () => invoke<PlayerState>("player.state"),
+  togglePause: () => invoke<unknown>("player.togglePause").then(() => undefined),
+  seek: (positionMs: number) =>
+    invoke<unknown>("player.seek", { positionMs }).then(() => undefined),
+  seekRelative: (offsetMs: number) =>
+    invoke<unknown>("player.seekRelative", { offsetMs }).then(() => undefined),
+  setVolume: (volume: number) =>
+    invoke<unknown>("player.setVolume", { volume }).then(() => undefined),
+  toggleMute: () => invoke<unknown>("player.toggleMute").then(() => undefined),
+  setSpeed: (speed: number) =>
+    invoke<unknown>("player.setSpeed", { speed }).then(() => undefined),
+  setAudioTrack: (id: number) =>
+    invoke<unknown>("player.setAudioTrack", { id }).then(() => undefined),
+  setSubtitleTrack: (id: number) =>
+    invoke<unknown>("player.setSubtitleTrack", { id }).then(() => undefined),
+  setFullscreen: (fullscreen: boolean) =>
+    invoke<unknown>("window.setFullscreen", { enabled: fullscreen }).then(() => undefined),
   stop: () => invoke<unknown>("player.stop").then(() => undefined),
 };
 
@@ -143,15 +156,15 @@ export const platform: Platform = {
     set: setValue,
     remove: deleteValue,
   },
-  // Reused for now, and only partly right: these launch by URL scheme, which a
-  // webview answers differently from a browser tab. What a desktop shell should
-  // do instead is ask the operating system what is installed — that belongs in
-  // Rust, and replaces this wholesale rather than patching it.
+  // The desktop build has one playback path: the native libmpv surface above.
+  // Do not inherit browser URL-scheme players here. Besides being confusing in
+  // Settings, those schemes can hand a stream out of the app without the native
+  // progress and track-selection behavior the desktop client promises.
   externalPlayer: {
-    options: externalPlayerOptions,
-    label: externalPlayerLabel,
-    isAvailable: isExternalPlayerAvailable,
-    launch: launchExternalPlayer,
+    options: () => [],
+    label: () => "Internal libmpv",
+    isAvailable: (mode) => mode === "internal",
+    launch: () => undefined,
     copyUrl: copyStreamUrl,
   },
 };
