@@ -76,17 +76,53 @@ const downloads = {
  * because there is no JavaScript context that could reach it even in
  * principle. What crosses the bridge is a path and a body; the shell signs.
  */
+/**
+ * The shell's account payload, as the shared UI expects a session.
+ *
+ * They are not the same shape and never were: the shell answers with
+ * `{ auth: { userId, email, backendUrl, ... }, profiles, ... }` while the UI
+ * wants `{ user: { id, email }, backend }`. Passing one off as the other
+ * happened to work for as long as nothing read `user` — Settings was the first
+ * page to, and it took the whole app down with it rather than showing a
+ * missing address.
+ */
+type ShellAccount = {
+  auth?: {
+    userId?: string;
+    email?: string;
+    backendUrl?: string;
+    selfHosted?: boolean;
+  };
+};
+
+function toSession(payload: ShellAccount): Session {
+  const account = payload.auth ?? {};
+  return {
+    user: { id: account.userId ?? "", email: account.email },
+    backend: {
+      url: account.backendUrl ?? "",
+      // The shell holds the publishable key and does not hand it back, which
+      // is the point of it owning the session. Nothing in the UI reads this;
+      // it is here because the type says a session has a backend.
+      key: "",
+      selfHosted: account.selfHosted ?? false,
+    },
+  };
+}
+
 const auth = {
   signIn: (backend: BackendConfig, email: string, password: string) =>
     invoke<unknown>("auth.configureBackend", {
       url: backend.url,
       key: backend.key,
       selfHosted: backend.selfHosted,
-    }).then(() => invoke<Session>("auth.signIn", { email, password })),
+    })
+      .then(() => invoke<ShellAccount>("auth.signIn", { email, password }))
+      .then(toSession),
   // Restores rather than reports. `auth.state` answers with whatever session
   // is loaded, which on a fresh launch is none — the shell has to be asked to
   // rotate the stored credential first.
-  restore: () => invoke<Session>("auth.restore"),
+  restore: () => invoke<ShellAccount>("auth.restore").then(toSession),
   signOut: () => invoke<unknown>("auth.signOut").then(() => undefined),
   request: <T>(
     path: string,
