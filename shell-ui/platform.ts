@@ -142,10 +142,39 @@ export const platform: Platform = {
   auth,
   player,
   downloads,
-  // Absent until the resolver is ported. The contract exists, the shell's
-  // credentials do too, but nothing on either client turns a cached link into
-  // a playable URL yet — so the UI should go on rendering as though it cannot,
-  // because it cannot.
+  /**
+   * Reachable from here, unlike from a page.
+   *
+   * The keys themselves are the account's and sync to every client; what a
+   * browser cannot do is use them, because Torbox sends no cross-origin
+   * headers. This shell makes its requests from Rust, so it can.
+   *
+   * The rows are the ones Nuvio seeds — "debrid:torbox" and friends, each
+   * keeping its key under api_key — so a key set here appears on the phone and
+   * the TV without anything further.
+   */
+  debrid: {
+    services: [
+      {
+        id: "torbox",
+        label: "Torbox",
+        credentialProvider: "debrid:torbox",
+        credentialField: "api_key",
+      },
+      {
+        id: "premiumize",
+        label: "Premiumize",
+        credentialProvider: "debrid:premiumize",
+        credentialField: "api_key",
+      },
+      {
+        id: "realdebrid",
+        label: "Real-Debrid",
+        credentialProvider: "debrid:realdebrid",
+        credentialField: "api_key",
+      },
+    ],
+  },
   request,
   // The webview has IndexedDB like any other, so the browser's implementation
   // is reused rather than reimplemented over the bridge. What belongs in files
