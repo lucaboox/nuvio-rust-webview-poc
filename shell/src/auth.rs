@@ -738,7 +738,12 @@ impl AuthService {
             ));
         }
         let method = method.trim().to_ascii_uppercase();
-        self.authorized_json(path, |client, url, config, token| {
+        // Decoded leniently, unlike `authorized_json`. PostgREST answers a
+        // mutation with 204 and no body, and the shared UI sends its settings
+        // writes through here — parsing that as JSON reports a failure for a
+        // write the server already committed, which is the mistake `rpc_unit`
+        // exists to avoid on the paths that were already native.
+        let value: Value = self.authorized_json_lenient(path, |client, url, config, token| {
             let mut builder = match method.as_str() {
                 "POST" => client.post(url),
                 "PATCH" => client.patch(url),
@@ -762,7 +767,55 @@ impl AuthService {
                 builder = builder.header("content-type", "application/json").body(body);
             }
             builder.send()
-        })
+        })?;
+        Ok(value)
+    }
+
+    /// `authorized_json`, but an empty success body decodes as null rather
+    /// than as a parse error.
+    fn authorized_json_lenient<F>(&self, path: &str, request: F) -> Result<Value>
+    where
+        F: Fn(&Client, String, &BackendConfig, &str) -> Result<Response, reqwest::Error>,
+    {
+        let config = self
+            .config
+            .as_ref()
+            .context("This build has no Nuvio backend configuration")?;
+        let session = self
+            .session
+            .as_ref()
+            .context("Sign in before accessing Nuvio data")?;
+        let send = |access_token: &str| {
+            self.send_with_fallback(config, |base_url| {
+                request(&self.client, format!("{base_url}{path}"), config, access_token)
+            })
+        };
+        let access_token = session.access_token()?;
+        let mut response = send(&access_token)?;
+        if should_refresh_authorized_request(response.status().as_u16(), session.user.is_anonymous)
+        {
+            drop(response);
+            let refreshed = self.refresh_after_unauthorized(session, &access_token)?;
+            response = send(&refreshed)?;
+        }
+        let status = response.status();
+        let payload = response.text().context("failed to read backend response")?;
+        if !status.is_success() {
+            let message = serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|value| {
+                    ["error_description", "msg", "message", "error"]
+                        .iter()
+                        .find_map(|key| value.get(key).and_then(Value::as_str))
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| format!("Nuvio backend returned HTTP {status}"));
+            bail!(message);
+        }
+        if payload.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&payload).context("backend returned an unexpected response shape")
     }
 
     pub fn rpc_value(&self, function: &str, params: &Value) -> Result<Value> {
