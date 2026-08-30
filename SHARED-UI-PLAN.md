@@ -159,7 +159,12 @@ Each step should end with something that runs.
      credentials so it does not serve a dead one. Worth porting on its own
      merits: re-resolving costs a Torbox round trip every time.
 
-   Port those two and `ui/` can go in one commit.
+   **Done.** Both were ported with tests, and `ui/` is gone — along with
+   `vite.config.ts`, which existed to build it, and the `*:ui` scripts, one of
+   which `test:shell` still called. `shell-ui` is now the whole of this
+   repository's TypeScript, and is typechecked for the first time: the old
+   `tsconfig.app.json` included `ui/src` only, so the capability layer — the one
+   file that differs per shell — was never checked at all.
 5. **The player, in the window.** The risk this step was flagged for turned out
    not to exist: the shell already composites libmpv into its own window, and
    the mechanism is four lines rather than a windowing project. What follows is
