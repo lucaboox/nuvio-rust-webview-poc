@@ -11,6 +11,7 @@
  * dirty the submodule and lose the change on the next update.
  */
 
+import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "./bridge.ts";
 import { copyStreamUrl } from "../shared-ui/src/lib/externalPlayer.ts";
 import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
@@ -64,6 +65,13 @@ const downloads = {
       (result) => result.image ?? null,
     ),
   openFolder: () => invoke<unknown>("downloads.openFolder").then(() => undefined),
+  // The native picker, which is the whole reason this is a capability: the
+  // shared page cannot import a Tauri plugin, and only a shell can offer a
+  // directory chooser at all.
+  chooseFolder: (current?: string) =>
+    open({ directory: true, multiple: false, defaultPath: current }).then(
+      (value) => (typeof value === "string" ? value : null),
+    ),
   moveStorage: (path: string) =>
     invoke<unknown>("downloads.moveStorage", { path }).then(() => undefined),
 };
