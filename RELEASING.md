@@ -39,7 +39,7 @@ npm run version:set -- 0.1.0-alpha.2
 # Move the shipped notes into a dated [0.1.0-alpha.2] section in CHANGELOG.md.
 npm run release:notes
 npm run prepare:runtime
-npm run check:ui
+npm run check:shell-ui
 cargo test --manifest-path shell/Cargo.toml
 git add CHANGELOG.md package.json package-lock.json shell/Cargo.toml shell/Cargo.lock shell/tauri.conf.json
 git commit -m "Release 0.1.0-alpha.2"

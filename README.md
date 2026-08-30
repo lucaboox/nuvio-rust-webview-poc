@@ -40,14 +40,15 @@ From this directory:
 
 ```powershell
 npm.cmd install
+git submodule update --init --recursive
 npm.cmd run prepare:runtime
-npm.cmd run check:ui
-npm.cmd run build:ui
+npm.cmd run check:shell-ui
+npm.cmd run build:shared-ui
 cargo test --manifest-path shell/Cargo.toml
 npm.cmd run tauri -- dev --config shell/tauri.conf.json
 ```
 
-The UI must be built before a direct Cargo build because the shell embeds `ui/dist` at compile time. Direct Cargo commands also need the pinned Windows libmpv runtime prepared first. Tauri commands handle both through `beforeBuildCommand`; the runtime download is SHA-256 verified and then reused locally.
+The UI must be built before a direct Cargo build because the shell embeds `shared-ui/dist` at compile time. That is the Nuvio Web client, checked out here as a submodule and built with this shell's capability layer substituted for the browser's — `build:shared-ui` is what performs the substitution, so building the submodule directly produces a browser bundle instead. Direct Cargo commands also need the pinned Windows libmpv runtime prepared first. Tauri commands handle both through `beforeBuildCommand`; the runtime download is SHA-256 verified and then reused locally.
 
 The local `.env.local` contains the public Supabase client URL and key embedded in official builds. It is ignored by Git. Use `.env.example` when configuring another checkout. At runtime, the login screen's **Self-hosted backend** option can override those compiled values with a Supabase/Nuvio base URL and publishable key. That public client configuration is kept locally in Nuvio's application-data directory and reused on later launches; it is never written to the repository or synced to an account.
 
@@ -55,5 +56,5 @@ Sign in with an existing Nuvio account to test real profiles and the read-only A
 
 ## Development notes
 
-- `npm.cmd run dev:ui` can preview the React layout in a browser, but native bridge actions will correctly report that the bridge is unavailable.
+- The UI itself is developed in the Nuvio Web repository — `npm run dev` there serves it in a browser, where every desktop-only capability is simply absent rather than broken. What cannot be previewed that way is this shell's half of the contract, so changes to `shell-ui/platform.ts` want a real `npm.cmd run dev`.
 - IPC work is dispatched away from the WebView UI thread. Addon requests fan out concurrently while preserving stable display order.

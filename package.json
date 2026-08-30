@@ -5,18 +5,15 @@
   "type": "module",
   "scripts": {
     "prepare:runtime": "node scripts/prepare-libmpv.mjs",
-    "build:ui": "vite build",
-    "check:ui": "tsc -b",
-    "test:ui": "node --experimental-strip-types --test ui/src/data/*.test.mjs",
-    "dev:ui": "vite",
+    "build:shared-ui": "node scripts/build-shared-ui.mjs",
+    "check:shell-ui": "tsc",
     "build": "npm run prepare:runtime && npm run build:shared-ui && cargo build --manifest-path shell/Cargo.toml",
     "dev": "npm run prepare:runtime && npm run build:shared-ui && cargo run --manifest-path shell/Cargo.toml",
     "tauri": "tauri",
     "bundle": "tauri build --config shell/tauri.conf.json",
     "release:notes": "node scripts/release-notes.mjs",
     "version:set": "node scripts/set-version.mjs",
-    "test:shell": "npm run prepare:runtime && npm run build:ui && cargo test --manifest-path shell/Cargo.toml",
-    "build:shared-ui": "node scripts/build-shared-ui.mjs"
+    "test:shell": "npm run prepare:runtime && npm run build:shared-ui && cargo test --manifest-path shell/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
