@@ -126,17 +126,40 @@ Each step should end with something that runs.
    storage to need the shell's versions.
 3. **Reattach downloads** through `platform.downloads`. The existing
    `DownloadsPage` moves across mostly intact.
-4. **Delete `ui/`'s duplicates** only once their replacements work. Checked
-   before attempting it: of the nineteen modules in `ui/src/data`, four share a
-   name with a shared-UI counterpart and the rest do not. Some are the same
-   thing renamed — `continueWatching` against `progress`, `seriesProgress`
-   against `seriesPlayback`, `bingeGroupCache` against `bingeCache` — but
-   `debridStreams`, `settingsRegistry` and `integrationSettings` have no
-   counterpart at all, because the capabilities they belong to are still
-   absent. Deleting the tree wholesale would take the Debrid filtering rules
-   and the settings registry with it, along with fourteen passing tests. The
-   word in this step is *duplicates*, and it has to be honoured module by
-   module rather than by removing the folder.
+4. **Delete `ui/`'s duplicates** only once their replacements work. The word in
+   this step is *duplicates*, and it has to be honoured module by module rather
+   than by removing the folder — a wholesale delete would have taken the Debrid
+   filtering rules with it, along with the tests behind them.
+
+   That audit is now done, module by module against `Web-Version/src/lib`.
+   Matching by name was never going to answer it: most of the counterparts were
+   renamed on the way across, so each one had to be read.
+
+   **Covered, under a different name** — `continueWatching`→`progress`,
+   `seriesProgress`→`seriesPlayback`, `bingeGroupCache`→`bingeCache`,
+   `streamAutoplay`→`nextEpisode`, `integrationSettings`→`providerCredentials`,
+   `posterSize`+`clientSettings`→`webSettings`, `catalogLabels`→`mediaTypeLabel`
+   and the row-naming inline in `addons.ts`, `debridStreams` ported outright.
+
+   **Covered by a different mechanism** — `libraryCache` and `watchedOverrides`
+   are caches and optimistic-update bookkeeping that the shared UI does against
+   React state directly (`library.some(...)`, and the rollback in `App.tsx`), so
+   there is nothing to port, only something not to reintroduce.
+   `settingsRegistry` is 1114 lines of declarative setting definitions against a
+   hand-written Settings page; the same settings, a different architecture.
+
+   **`home.ts` is dead** — demo fixtures, no importers even inside `ui/`.
+
+   **Genuinely unported, and the whole of what still blocks this step:**
+
+   - `recentSearches` (49 lines) — search history. The shared UI's search has
+     none.
+   - `streamLinkCache` (175 lines) — reuses a resolved debrid link for 24h
+     instead of resolving it again, and knows which URLs carry expiring
+     credentials so it does not serve a dead one. Worth porting on its own
+     merits: re-resolving costs a Torbox round trip every time.
+
+   Port those two and `ui/` can go in one commit.
 5. **The player, in the window.** The risk this step was flagged for turned out
    not to exist: the shell already composites libmpv into its own window, and
    the mechanism is four lines rather than a windowing project. What follows is
