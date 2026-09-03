@@ -23,23 +23,18 @@ use std::sync::{Arc, Mutex};
 
 use app_state::AppState;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, Window, WindowEvent, window::Color};
+use tauri::{AppHandle, Manager, State, Window, WindowEvent};
 
-/// The app background, matching the UI's own `--app-bg`.
-///
-/// A transparent window with nothing behind it shows the desktop through the
-/// gaps, so the page must be given a colour to paint rather than simply being
-/// left alpha.
-const OPAQUE_BACKGROUND: Color = Color(8, 10, 13, 255);
-
-/// Alpha zero, stated outright.
-///
-/// `set_background_color(None)` is "no colour of my own", not "transparent" —
-/// WebView2's own default is opaque, so clearing the override left the webview
-/// still painting over mpv and playback stayed a grey rectangle even though the
-/// page above it had gone clear. Asking for zero alpha leaves nothing to
-/// interpret.
-const CLEAR_BACKGROUND: Color = Color(0, 0, 0, 0);
+// The webview stays transparent for the life of the window, which is how mpv —
+// drawing into a child of the same window, behind it — is visible at all.
+//
+// It was gated on playback for a while to get WebView2 off its alpha
+// compositing path, which had made scrolling the library slow. That cost a
+// working player: the video came up grey, and forcing the background back to
+// clear did not reliably restore it. A player that shows the film beats a
+// library that scrolls smoothly, so the gating is gone. The scrolling is worth
+// another attempt somewhere that cannot break playback — the blur on the source
+// sheet is the more likely culprit and was added around the same time.
 
 type SharedState = Arc<Mutex<AppState>>;
 
@@ -53,34 +48,6 @@ type SharedState = Arc<Mutex<AppState>>;
 /// the UI thread.
 #[tauri::command]
 async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value>, String> {
-    if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)
-        && matches!(request.method.as_str(), "player.prepare" | "player.stop")
-    {
-        // Transparency is only wanted while something is playing behind the
-        // page. It is cheap to ask for and expensive to have: a permanently
-        // transparent webview composites with alpha, which drops WebView2 off
-        // its fast path and made scrolling the library visibly slower than the
-        // same UI in a browser. The window is still created transparent —
-        // Windows decides that at creation — but it paints opaque until mpv is
-        // actually behind it.
-        //
-        // Deliberately not an early return: the request still has to reach the
-        // player below, so this only sets the colour on the way past.
-        //
-        // It has to be the *webview's* background, not the window's. mpv draws
-        // into a child of the top-level window and is revealed by the webview
-        // painting alpha over it, so clearing the native window's colour did
-        // nothing to the sheet actually covering the video — playback came up
-        // as a grey rectangle, which is the opaque webview, not a broken
-        // player.
-        if let Some(webview) = app.get_webview_window("main") {
-            let _ = webview.set_background_color(Some(if request.method == "player.stop" {
-                OPAQUE_BACKGROUND
-            } else {
-                CLEAR_BACKGROUND
-            }));
-        }
-    }
     if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)
         && request.method == "window.setFullscreen"
     {
@@ -183,10 +150,6 @@ fn main() {
                 window.set_icon(tauri::image::Image::from_bytes(include_bytes!(
                     "../assets/Nuvio-icon.png"
                 ))?)?;
-                // Opaque until playback needs otherwise. See the note in
-                // `bridge`: this is what keeps ordinary browsing off WebView2's
-                // alpha compositing path.
-                window.set_background_color(Some(OPAQUE_BACKGROUND))?;
                 let hwnd = window.hwnd()?.0 as isize;
                 let state: State<'_, SharedState> = app.state();
                 if let Ok(state) = state.lock()
