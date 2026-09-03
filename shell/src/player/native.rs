@@ -10,8 +10,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use windows_sys::Win32::{
-    Foundation::HWND,
-    UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
+    Foundation::{HWND, RECT},
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, DispatchMessageW, GetClientRect, HWND_BOTTOM, MSG,
+        PM_REMOVE, PeekMessageW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, TranslateMessage,
+        WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    },
 };
 
 use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages};
@@ -316,10 +320,11 @@ fn run_player(
         let mpv_free = *library.get::<MpvFree>(b"mpv_free\0")?;
         let mpv_destroy = *library.get::<MpvDestroy>(b"mpv_terminate_destroy\0")?;
 
-        // Match Nuvio's Windows bridge: mpv renders into the same native host
-        // whose WebView2 controller supplies transparent controls. A separate
-        // sibling video HWND cannot show through a windowed WebView2 surface.
-        let hwnd = parent;
+        // Match Nuvio's Windows bridge: give mpv a dedicated child surface
+        // sized to the host client area. Passing the top-level HWND directly
+        // makes panscan calculate against window chrome and sibling geometry,
+        // so Zoom can appear identical to Fit despite the right properties.
+        let mut video_host = VideoHost::create(parent)?;
 
         let raw_handle = mpv_create();
         if raw_handle.is_null() {
@@ -462,7 +467,7 @@ fn run_player(
             )?;
         }
         let wid_name = CString::new("wid")?;
-        let mut wid = hwnd as isize as i64;
+        let mut wid = video_host.hwnd as isize as i64;
         if mpv_set_option(handle, wid_name.as_ptr(), 4, (&mut wid as *mut i64).cast()) < 0
             || mpv_initialize(handle) < 0
         {
@@ -641,6 +646,7 @@ fn run_player(
             sample_tick += 1;
             if sample_tick >= 20 {
                 sample_tick = 0;
+                video_host.sync_to(parent);
                 let _ = get_double(mpv_get_property, handle, "time-pos", &mut position);
                 let _ = get_double(mpv_get_property, handle, "duration", &mut duration);
                 let mut paused = 0i32;
@@ -982,6 +988,85 @@ unsafe fn set_property(
         bail!("libmpv rejected property {name:?}")
     } else {
         Ok(())
+    }
+}
+
+struct VideoHost {
+    hwnd: HWND,
+    last_size: (i32, i32),
+}
+
+impl VideoHost {
+    unsafe fn create(parent: HWND) -> Result<Self> {
+        let mut bounds: RECT = unsafe { std::mem::zeroed() };
+        if unsafe { GetClientRect(parent, &mut bounds) } == 0 {
+            bail!("could not measure the native player window");
+        }
+        let width = (bounds.right - bounds.left).max(1);
+        let height = (bounds.bottom - bounds.top).max(1);
+        let class_name: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                ptr::null(),
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                0,
+                0,
+                width,
+                height,
+                parent,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        if hwnd.is_null() {
+            bail!("could not create the native player video surface");
+        }
+        let mut host = Self {
+            hwnd,
+            last_size: (0, 0),
+        };
+        unsafe { host.sync_to(parent) };
+        Ok(host)
+    }
+
+    unsafe fn sync_to(&mut self, parent: HWND) {
+        let mut bounds: RECT = unsafe { std::mem::zeroed() };
+        if unsafe { GetClientRect(parent, &mut bounds) } == 0 {
+            return;
+        }
+        let size = (
+            (bounds.right - bounds.left).max(1),
+            (bounds.bottom - bounds.top).max(1),
+        );
+        if size == self.last_size {
+            return;
+        }
+        // Keep native video below Tauri's transparent WebView, which owns the
+        // controls, and give mpv an exact drawable viewport like official Nuvio.
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                HWND_BOTTOM,
+                0,
+                0,
+                size.0,
+                size.1,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+        self.last_size = size;
+    }
+}
+
+impl Drop for VideoHost {
+    fn drop(&mut self) {
+        if !self.hwnd.is_null() {
+            unsafe { DestroyWindow(self.hwnd) };
+            self.hwnd = ptr::null_mut();
+        }
     }
 }
 unsafe fn command_async(
