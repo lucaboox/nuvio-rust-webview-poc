@@ -307,6 +307,13 @@ fn handle_player_command(
             Some(speed) => unit_result(id, player.set_speed(speed)),
             None => failure(id, "invalid_params", "A speed is required".to_string()),
         },
+        "player.setResizeMode" => match string_param(&request.params, "mode") {
+            Some(mode) => unit_result(
+                id,
+                player.set_resize_mode(crate::player::ResizeMode::from_setting(&mode)),
+            ),
+            None => failure(id, "invalid_params", "A resize mode is required".to_string()),
+        },
         "player.setAudioTrack" => match request.params.get("id").and_then(Value::as_i64) {
             Some(track) => unit_result(id, player.set_audio_track(track)),
             None => failure(id, "invalid_params", "A track id is required".to_string()),
@@ -1854,6 +1861,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         | "player.cycleAudio"
         | "player.cycleSubtitle"
         | "player.setSpeed"
+        | "player.setResizeMode"
         | "player.setAudioTrack"
         | "player.setSubtitleTrack"
         | "player.stop" => state

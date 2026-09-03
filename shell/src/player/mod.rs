@@ -308,6 +308,12 @@ impl PlayerService {
         self.send(native::PlayerCommand::SetSpeed(speed.clamp(0.25, 4.0)))
     }
 
+    /// Cycled from the player's own control, so it changes for this playback
+    /// without rewriting the account's default.
+    pub fn set_resize_mode(&self, mode: ResizeMode) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetResizeMode(mode))
+    }
+
     pub fn stop(&mut self) {
         #[cfg(windows)]
         if let Some(runtime) = self.runtime.take() {

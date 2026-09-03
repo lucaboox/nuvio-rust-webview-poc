@@ -42,6 +42,7 @@ pub enum PlayerCommand {
     SetAudio(i64),
     SetSubtitle(i64),
     SetSpeed(f64),
+    SetResizeMode(ResizeMode),
     Stop,
 }
 
@@ -55,6 +56,7 @@ struct PendingCommands {
     audio: Option<PlayerCommand>,
     subtitle: Option<PlayerCommand>,
     speed: Option<f64>,
+    resize_mode: Option<ResizeMode>,
 }
 
 /// A bounded, coalescing mailbox for UI controls. Slider input can generate
@@ -94,6 +96,7 @@ impl PlayerCommands {
                 pending.subtitle = Some(command);
             }
             PlayerCommand::SetSpeed(value) => pending.speed = Some(value),
+            PlayerCommand::SetResizeMode(mode) => pending.resize_mode = Some(mode),
         }
         Ok(())
     }
@@ -126,6 +129,9 @@ impl PlayerCommands {
         }
         if let Some(value) = pending.speed.take() {
             commands.push(PlayerCommand::SetSpeed(value));
+        }
+        if let Some(mode) = pending.resize_mode.take() {
+            commands.push(PlayerCommand::SetResizeMode(mode));
         }
         commands
     }
@@ -533,6 +539,28 @@ fn run_player(
                             handle,
                             5,
                             &["set", "speed", &format!("{speed:.3}")],
+                        );
+                    }
+                    PlayerCommand::SetResizeMode(mode) => {
+                        // The same pair the initial options set, so switching
+                        // at runtime lands on exactly the geometry a fresh
+                        // launch in that mode would have produced.
+                        let (keep_aspect, panscan) = match mode {
+                            ResizeMode::Fit => ("yes", "0.0"),
+                            ResizeMode::Fill | ResizeMode::Zoom => ("yes", "1.0"),
+                            ResizeMode::Stretch => ("no", "0.0"),
+                        };
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            6,
+                            &["set", "keepaspect", keep_aspect],
+                        );
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            7,
+                            &["set", "panscan", panscan],
                         );
                     }
                     PlayerCommand::Stop => stopped = true,

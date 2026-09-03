@@ -32,6 +32,15 @@ use tauri::{AppHandle, Manager, State, Window, WindowEvent, window::Color};
 /// left alpha.
 const OPAQUE_BACKGROUND: Color = Color(8, 10, 13, 255);
 
+/// Alpha zero, stated outright.
+///
+/// `set_background_color(None)` is "no colour of my own", not "transparent" —
+/// WebView2's own default is opaque, so clearing the override left the webview
+/// still painting over mpv and playback stayed a grey rectangle even though the
+/// page above it had gone clear. Asking for zero alpha leaves nothing to
+/// interpret.
+const CLEAR_BACKGROUND: Color = Color(0, 0, 0, 0);
+
 type SharedState = Arc<Mutex<AppState>>;
 
 /// The whole bridge is one command: the UI keeps speaking the existing
@@ -65,11 +74,11 @@ async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value
         // as a grey rectangle, which is the opaque webview, not a broken
         // player.
         if let Some(webview) = app.get_webview_window("main") {
-            let _ = webview.set_background_color(if request.method == "player.stop" {
-                Some(OPAQUE_BACKGROUND)
+            let _ = webview.set_background_color(Some(if request.method == "player.stop" {
+                OPAQUE_BACKGROUND
             } else {
-                None
-            });
+                CLEAR_BACKGROUND
+            }));
         }
     }
     if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)

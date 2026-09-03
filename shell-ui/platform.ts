@@ -173,6 +173,8 @@ const player = {
   toggleMute: () => invoke<unknown>("player.toggleMute").then(() => undefined),
   setSpeed: (speed: number) =>
     invoke<unknown>("player.setSpeed", { speed }).then(() => undefined),
+  setResizeMode: (mode: string) =>
+    invoke<unknown>("player.setResizeMode", { mode }).then(() => undefined),
   setAudioTrack: (id: number) =>
     invoke<unknown>("player.setAudioTrack", { id }).then(() => undefined),
   setSubtitleTrack: (id: number) =>
