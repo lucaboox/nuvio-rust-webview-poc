@@ -25,13 +25,13 @@ const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 /// legacy Fill value as Zoom, and its native Windows and macOS bridges map
 /// both values to a full pan-and-scan. Keeping the alias here makes a fresh
 /// launch and a runtime mode change produce the same picture geometry.
-fn panscan_for(mode: ResizeMode) -> (&'static str, &'static str) {
+fn picture_properties_for(mode: ResizeMode) -> (&'static str, &'static str, &'static str) {
     match mode {
-        ResizeMode::Fit => ("yes", "0.0"),
-        ResizeMode::Zoom | ResizeMode::Fill => ("yes", "1.0"),
+        ResizeMode::Fit => ("yes", "0.0", "no"),
+        ResizeMode::Zoom | ResizeMode::Fill => ("yes", "1.0", "no"),
         // The one the official client leaves to its surface rather than mpv;
         // on this shell mpv owns the surface, so the aspect lock comes off.
-        ResizeMode::Stretch => ("no", "0.0"),
+        ResizeMode::Stretch => ("no", "0.0", "no"),
     }
 }
 
@@ -188,6 +188,7 @@ struct MpvEventEndFile {
 }
 type MpvCreate = unsafe extern "C" fn() -> *mut c_void;
 type MpvSetOptionString = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i32;
+type MpvSetPropertyString = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i32;
 type MpvSetOption = unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut c_void) -> i32;
 type MpvInitialize = unsafe extern "C" fn(*mut c_void) -> i32;
 type MpvCommand = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> i32;
@@ -304,6 +305,8 @@ fn run_player(
         let mpv_create = *library.get::<MpvCreate>(b"mpv_create\0")?;
         let mpv_set_option_string =
             *library.get::<MpvSetOptionString>(b"mpv_set_option_string\0")?;
+        let mpv_set_property_string =
+            *library.get::<MpvSetPropertyString>(b"mpv_set_property_string\0")?;
         let mpv_set_option = *library.get::<MpvSetOption>(b"mpv_set_option\0")?;
         let mpv_initialize = *library.get::<MpvInitialize>(b"mpv_initialize\0")?;
         let mpv_command = *library.get::<MpvCommand>(b"mpv_command\0")?;
@@ -337,7 +340,7 @@ fn run_player(
         )?;
         set_option(mpv_set_option_string, handle, "input-vo-keyboard", "no")?;
         set_option(mpv_set_option_string, handle, "keep-open", "yes")?;
-        let (keep_aspect, panscan) = panscan_for(resize_mode);
+        let (keep_aspect, panscan, video_unscaled) = picture_properties_for(resize_mode);
         // Track preferences, in mpv's own priority order. Set as options rather
         // than chosen afterwards so the first frame already has the right audio
         // — switching after load is audible.
@@ -398,7 +401,12 @@ fn run_player(
         set_option(mpv_set_option_string, handle, "keepaspect-window", "no")?;
         set_option(mpv_set_option_string, handle, "video-aspect-override", "no")?;
         set_option(mpv_set_option_string, handle, "panscan", panscan)?;
-        set_option(mpv_set_option_string, handle, "video-unscaled", "no")?;
+        set_option(
+            mpv_set_option_string,
+            handle,
+            "video-unscaled",
+            video_unscaled,
+        )?;
         set_option(mpv_set_option_string, handle, "video-zoom", "0")?;
         set_option(mpv_set_option_string, handle, "video-align-x", "0")?;
         set_option(mpv_set_option_string, handle, "video-align-y", "0")?;
@@ -570,21 +578,25 @@ fn run_player(
                         );
                     }
                     PlayerCommand::SetResizeMode(mode) => {
-                        // The same pair the initial options set, so switching
-                        // at runtime lands on exactly the geometry a fresh
-                        // launch in that mode would have produced.
-                        let (keep_aspect, panscan) = panscan_for(mode);
-                        let _ = command_async(
-                            mpv_command_async,
+                        // Official Nuvio reapplies the complete geometry set as
+                        // synchronous properties after the file is loaded. Do
+                        // the same here: relying on the pre-load option for
+                        // `video-unscaled` left panscan ineffective on some
+                        // streams, so Zoom retained letterboxing instead of
+                        // behaving as aspect-fill.
+                        let (keep_aspect, panscan, video_unscaled) = picture_properties_for(mode);
+                        let _ = set_property(
+                            mpv_set_property_string,
                             handle,
-                            6,
-                            &["set", "keepaspect", keep_aspect],
+                            "keepaspect",
+                            keep_aspect,
                         );
-                        let _ = command_async(
-                            mpv_command_async,
+                        let _ = set_property(mpv_set_property_string, handle, "panscan", panscan);
+                        let _ = set_property(
+                            mpv_set_property_string,
                             handle,
-                            7,
-                            &["set", "panscan", panscan],
+                            "video-unscaled",
+                            video_unscaled,
                         );
                     }
                     PlayerCommand::Stop => stopped = true,
@@ -958,6 +970,20 @@ unsafe fn command(function: MpvCommand, handle: *mut c_void, values: &[&str]) ->
         Ok(())
     }
 }
+unsafe fn set_property(
+    function: MpvSetPropertyString,
+    handle: *mut c_void,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    let name = CString::new(name)?;
+    let value = CString::new(value)?;
+    if unsafe { function(handle, name.as_ptr(), value.as_ptr()) } < 0 {
+        bail!("libmpv rejected property {name:?}")
+    } else {
+        Ok(())
+    }
+}
 unsafe fn command_async(
     function: MpvCommandAsync,
     handle: *mut c_void,
@@ -1004,10 +1030,22 @@ mod tests {
 
     #[test]
     fn picture_modes_match_the_official_desktop_bridge() {
-        assert_eq!(panscan_for(ResizeMode::Fit), ("yes", "0.0"));
-        assert_eq!(panscan_for(ResizeMode::Zoom), ("yes", "1.0"));
-        assert_eq!(panscan_for(ResizeMode::Fill), ("yes", "1.0"));
-        assert_eq!(panscan_for(ResizeMode::Stretch), ("no", "0.0"));
+        assert_eq!(
+            picture_properties_for(ResizeMode::Fit),
+            ("yes", "0.0", "no")
+        );
+        assert_eq!(
+            picture_properties_for(ResizeMode::Zoom),
+            ("yes", "1.0", "no")
+        );
+        assert_eq!(
+            picture_properties_for(ResizeMode::Fill),
+            ("yes", "1.0", "no")
+        );
+        assert_eq!(
+            picture_properties_for(ResizeMode::Stretch),
+            ("no", "0.0", "no")
+        );
     }
 
     #[test]
