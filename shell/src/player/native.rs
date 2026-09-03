@@ -17,6 +17,9 @@ use windows_sys::Win32::{
 use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages};
 
 const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
+const MPV_EVENT_FILE_LOADED: i32 = 8;
+const MPV_EVENT_VIDEO_RECONFIG: i32 = 17;
+const MPV_EVENT_PLAYBACK_RESTART: i32 = 21;
 
 /// mpv's geometry for each picture mode, matching the official client's
 /// `applyResizeMode`.
@@ -32,6 +35,24 @@ fn picture_properties_for(mode: ResizeMode) -> (&'static str, &'static str, &'st
         // The one the official client leaves to its surface rather than mpv;
         // on this shell mpv owns the surface, so the aspect lock comes off.
         ResizeMode::Stretch => ("no", "0.0", "no"),
+    }
+}
+
+unsafe fn apply_picture_mode(
+    set_property_string: MpvSetPropertyString,
+    handle: *mut c_void,
+    mode: ResizeMode,
+) -> Result<()> {
+    unsafe {
+        let (keep_aspect, panscan, video_unscaled) = picture_properties_for(mode);
+        set_property(set_property_string, handle, "keepaspect", keep_aspect)?;
+        set_property(set_property_string, handle, "panscan", panscan)?;
+        set_property(
+            set_property_string,
+            handle,
+            "video-unscaled",
+            video_unscaled,
+        )
     }
 }
 
@@ -493,6 +514,11 @@ fn run_player(
         let mut reached_eof = false;
         let mut track_count = -1i64;
         let mut tracks: Vec<PlayerTrack> = Vec::new();
+        // The VO is free to reconfigure while a file is opening (and again
+        // when its decoded dimensions become known). Retain the user's choice
+        // in this thread so every such transition ends with the intended
+        // geometry instead of depending on when the web-side poll happens.
+        let mut current_resize_mode = resize_mode;
         while !stopped {
             let mut message: MSG = std::mem::zeroed();
             while PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -584,19 +610,11 @@ fn run_player(
                         // `video-unscaled` left panscan ineffective on some
                         // streams, so Zoom retained letterboxing instead of
                         // behaving as aspect-fill.
-                        let (keep_aspect, panscan, video_unscaled) = picture_properties_for(mode);
-                        let _ = set_property(
+                        current_resize_mode = mode;
+                        let _ = apply_picture_mode(
                             mpv_set_property_string,
                             handle,
-                            "keepaspect",
-                            keep_aspect,
-                        );
-                        let _ = set_property(mpv_set_property_string, handle, "panscan", panscan);
-                        let _ = set_property(
-                            mpv_set_property_string,
-                            handle,
-                            "video-unscaled",
-                            video_unscaled,
+                            current_resize_mode,
                         );
                     }
                     PlayerCommand::Stop => stopped = true,
@@ -625,10 +643,25 @@ fn run_player(
                             current.error = Some(mpv_error_message((*end).error));
                         }
                     }
+                    MPV_EVENT_FILE_LOADED | MPV_EVENT_VIDEO_RECONFIG => {
+                        // File-loaded can precede the final decoded dimensions;
+                        // video-reconfig is the matching late boundary. Applying
+                        // at both makes opening identical to a later button press.
+                        let _ = apply_picture_mode(
+                            mpv_set_property_string,
+                            handle,
+                            current_resize_mode,
+                        );
+                    }
                     // MPV_EVENT_PLAYBACK_RESTART occurs after playback actually
-                    // has a frame ready. MPV_EVENT_FILE_LOADED (8) is too early
-                    // and caused the loading cover to reveal a blank video plane.
-                    21 => {
+                    // has a frame ready. MPV_EVENT_FILE_LOADED is too early to
+                    // reveal the surface, but is still useful for geometry.
+                    MPV_EVENT_PLAYBACK_RESTART => {
+                        let _ = apply_picture_mode(
+                            mpv_set_property_string,
+                            handle,
+                            current_resize_mode,
+                        );
                         if let Ok(mut current) = state.lock() {
                             current.loading = false;
                             current.ended = false;
