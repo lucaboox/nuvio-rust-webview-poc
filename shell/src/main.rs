@@ -57,11 +57,20 @@ async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value
         //
         // Deliberately not an early return: the request still has to reach the
         // player below, so this only sets the colour on the way past.
-        let _ = window.set_background_color(if request.method == "player.stop" {
-            Some(OPAQUE_BACKGROUND)
-        } else {
-            None
-        });
+        //
+        // It has to be the *webview's* background, not the window's. mpv draws
+        // into a child of the top-level window and is revealed by the webview
+        // painting alpha over it, so clearing the native window's colour did
+        // nothing to the sheet actually covering the video — playback came up
+        // as a grey rectangle, which is the opaque webview, not a broken
+        // player.
+        if let Some(webview) = app.get_webview_window("main") {
+            let _ = webview.set_background_color(if request.method == "player.stop" {
+                Some(OPAQUE_BACKGROUND)
+            } else {
+                None
+            });
+        }
     }
     if let Ok(request) = serde_json::from_str::<ipc::RequestEnvelope>(&raw)
         && request.method == "window.setFullscreen"

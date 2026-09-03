@@ -8,6 +8,23 @@ mod native;
 #[cfg(windows)]
 pub use native::find_mpv;
 
+/// Which audio and subtitle tracks to prefer, in mpv's own order of priority.
+///
+/// The settings existed and were parsed, but nothing ever handed them to mpv —
+/// so a file with several audio tracks always came up on whichever one it
+/// happened to list first, whatever the account said. Kept beside
+/// `SubtitleStyle` and for the same reason: the player layer should not have to
+/// know the sync schema.
+#[derive(Clone, Debug, Default)]
+pub struct TrackLanguages {
+    /// Preferred first, then the secondary, as mpv reads them left to right.
+    pub audio: Vec<String>,
+    pub subtitles: Vec<String>,
+    /// Nuvio's "only preferred languages": with nothing matching, show none
+    /// rather than falling back to a language that was not asked for.
+    pub subtitles_only_preferred: bool,
+}
+
 /// Subtitle appearance pushed into mpv at load time. Kept separate from the
 /// settings snapshot so the player layer does not depend on the sync schema.
 #[derive(Clone, Debug)]
@@ -158,6 +175,7 @@ impl PlayerService {
         start_position_ms: i64,
         subtitle_style: SubtitleStyle,
         resize_mode: ResizeMode,
+        languages: TrackLanguages,
         rtx_super_resolution: bool,
         on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
     ) -> anyhow::Result<String> {
@@ -208,6 +226,7 @@ impl PlayerService {
                 start_position_ms,
                 subtitle_style,
                 resize_mode,
+                languages,
                 rtx_super_resolution,
                 Arc::clone(&self.state),
                 on_progress,

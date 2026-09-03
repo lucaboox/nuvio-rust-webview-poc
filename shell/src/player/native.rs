@@ -14,7 +14,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
 };
 
-use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle};
+use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages};
 
 const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -191,6 +191,7 @@ pub fn launch(
     start_position_ms: i64,
     subtitle_style: SubtitleStyle,
     resize_mode: ResizeMode,
+    languages: TrackLanguages,
     rtx_super_resolution: bool,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
@@ -208,6 +209,7 @@ pub fn launch(
                 start_position_ms,
                 &subtitle_style,
                 resize_mode,
+                &languages,
                 rtx_super_resolution,
                 &state,
                 player_commands,
@@ -262,6 +264,7 @@ fn run_player(
     start_position_ms: i64,
     subtitle_style: &SubtitleStyle,
     resize_mode: ResizeMode,
+    languages: &TrackLanguages,
     rtx_super_resolution: bool,
     state: &Arc<Mutex<PlayerState>>,
     commands: PlayerCommands,
@@ -312,6 +315,31 @@ fn run_player(
             ResizeMode::Fill | ResizeMode::Zoom => ("yes", "1.0"),
             ResizeMode::Stretch => ("no", "0.0"),
         };
+        // Track preferences, in mpv's own priority order. Set as options rather
+        // than chosen afterwards so the first frame already has the right audio
+        // — switching after load is audible.
+        if !languages.audio.is_empty() {
+            set_option(
+                mpv_set_option_string,
+                handle,
+                "alang",
+                &languages.audio.join(","),
+            )?;
+        }
+        if !languages.subtitles.is_empty() {
+            set_option(
+                mpv_set_option_string,
+                handle,
+                "slang",
+                &languages.subtitles.join(","),
+            )?;
+        }
+        // "Only preferred languages": mpv would otherwise fall back to any
+        // subtitle track when none matches, which is the opposite of what the
+        // setting asks for.
+        if languages.subtitles_only_preferred && !languages.subtitles.is_empty() {
+            set_option(mpv_set_option_string, handle, "subs-fallback", "no")?;
+        }
         set_option(mpv_set_option_string, handle, "keepaspect", keep_aspect)?;
         set_option(mpv_set_option_string, handle, "keepaspect-window", "no")?;
         set_option(mpv_set_option_string, handle, "video-aspect-override", "no")?;

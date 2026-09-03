@@ -1931,6 +1931,34 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                             use_libass: snapshot.use_libass,
                         })
                         .unwrap_or_default();
+                    // Preferred first, secondary next — mpv reads the list
+                    // left to right, which is the same order the settings
+                    // present them in.
+                    let languages = player_settings
+                        .as_ref()
+                        .map(|snapshot| {
+                            let list = |first: &str, second: &str| {
+                                [first, second]
+                                    .into_iter()
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            };
+                            crate::player::TrackLanguages {
+                                audio: list(
+                                    &snapshot.preferred_audio_language,
+                                    &snapshot.secondary_audio_language,
+                                ),
+                                subtitles: list(
+                                    &snapshot.preferred_subtitle_language,
+                                    &snapshot.secondary_subtitle_language,
+                                ),
+                                subtitles_only_preferred: snapshot
+                                    .subtitle_preferred_languages_only,
+                            }
+                        })
+                        .unwrap_or_default();
                     let rtx_super_resolution = player_settings
                         .as_ref()
                         .is_some_and(|snapshot| snapshot.rtx_super_resolution);
@@ -1968,6 +1996,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                                 start_position_ms,
                                 subtitle_style,
                                 resize_mode,
+                                languages,
                                 rtx_super_resolution,
                                 spawn_progress_reporter(auth, profile_id, identity),
                             )
