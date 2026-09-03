@@ -308,6 +308,10 @@ impl PlayerService {
         self.send(native::PlayerCommand::SetSpeed(speed.clamp(0.25, 4.0)))
     }
 
+    pub fn set_muted(&self, muted: bool) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetMuted(muted))
+    }
+
     /// Cycled from the player's own control, so it changes for this playback
     /// without rewriting the account's default.
     pub fn set_resize_mode(&self, mode: ResizeMode) -> anyhow::Result<()> {

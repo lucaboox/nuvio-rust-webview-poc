@@ -18,6 +18,24 @@ use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages}
 
 const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 
+/// mpv's geometry for each picture mode, matching the official client's
+/// `applyResizeMode`.
+///
+/// Zoom is a half pan-and-scan, not a full one. Treating it as 1.0 — which is
+/// Fill — made the two modes identical and made Zoom crop far harder than it
+/// should, so cycling appeared not to work: two of the steps looked the same
+/// and the third was extreme.
+fn panscan_for(mode: ResizeMode) -> (&'static str, &'static str) {
+    match mode {
+        ResizeMode::Fit => ("yes", "0.0"),
+        ResizeMode::Zoom => ("yes", "0.5"),
+        ResizeMode::Fill => ("yes", "1.0"),
+        // The one the official client leaves to its surface rather than mpv;
+        // on this shell mpv owns the surface, so the aspect lock comes off.
+        ResizeMode::Stretch => ("no", "0.0"),
+    }
+}
+
 fn should_emit_progress_checkpoint(
     elapsed: Duration,
     pause_checkpoint_pending: bool,
@@ -37,6 +55,7 @@ pub enum PlayerCommand {
     SeekRelative(i64),
     Volume(i64),
     ToggleMute,
+    SetMuted(bool),
     CycleAudio,
     CycleSubtitle,
     SetAudio(i64),
@@ -53,6 +72,7 @@ struct PendingCommands {
     seek: Option<PlayerCommand>,
     volume: Option<i64>,
     toggle_mute: bool,
+    muted: Option<bool>,
     audio: Option<PlayerCommand>,
     subtitle: Option<PlayerCommand>,
     speed: Option<f64>,
@@ -89,6 +109,7 @@ impl PlayerCommands {
             }
             PlayerCommand::Volume(value) => pending.volume = Some(value),
             PlayerCommand::ToggleMute => pending.toggle_mute = !pending.toggle_mute,
+            PlayerCommand::SetMuted(value) => pending.muted = Some(value),
             command @ (PlayerCommand::CycleAudio | PlayerCommand::SetAudio(_)) => {
                 pending.audio = Some(command);
             }
@@ -120,6 +141,9 @@ impl PlayerCommands {
         }
         if std::mem::take(&mut pending.toggle_mute) {
             commands.push(PlayerCommand::ToggleMute);
+        }
+        if let Some(value) = pending.muted.take() {
+            commands.push(PlayerCommand::SetMuted(value));
         }
         if let Some(command) = pending.audio.take() {
             commands.push(command);
@@ -314,13 +338,7 @@ fn run_player(
         )?;
         set_option(mpv_set_option_string, handle, "input-vo-keyboard", "no")?;
         set_option(mpv_set_option_string, handle, "keep-open", "yes")?;
-        // This is deliberately identical to Nuvio's Windows player_bridge.cpp.
-        // Its desktop bridge currently treats Fill and Zoom the same way.
-        let (keep_aspect, panscan) = match resize_mode {
-            ResizeMode::Fit => ("yes", "0.0"),
-            ResizeMode::Fill | ResizeMode::Zoom => ("yes", "1.0"),
-            ResizeMode::Stretch => ("no", "0.0"),
-        };
+        let (keep_aspect, panscan) = panscan_for(resize_mode);
         // Track preferences, in mpv's own priority order. Set as options rather
         // than chosen afterwards so the first frame already has the right audio
         // — switching after load is audible.
@@ -541,15 +559,22 @@ fn run_player(
                             &["set", "speed", &format!("{speed:.3}")],
                         );
                     }
+                    PlayerCommand::SetMuted(value) => {
+                        // Stated rather than toggled: mpv's mute is separate
+                        // from its volume, so raising the slider while muted
+                        // left it muted and the next poll put the UI back.
+                        let _ = command_async(
+                            mpv_command_async,
+                            handle,
+                            8,
+                            &["set", "mute", if value { "yes" } else { "no" }],
+                        );
+                    }
                     PlayerCommand::SetResizeMode(mode) => {
                         // The same pair the initial options set, so switching
                         // at runtime lands on exactly the geometry a fresh
                         // launch in that mode would have produced.
-                        let (keep_aspect, panscan) = match mode {
-                            ResizeMode::Fit => ("yes", "0.0"),
-                            ResizeMode::Fill | ResizeMode::Zoom => ("yes", "1.0"),
-                            ResizeMode::Stretch => ("no", "0.0"),
-                        };
+                        let (keep_aspect, panscan) = panscan_for(mode);
                         let _ = command_async(
                             mpv_command_async,
                             handle,

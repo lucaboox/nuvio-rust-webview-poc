@@ -307,6 +307,10 @@ fn handle_player_command(
             Some(speed) => unit_result(id, player.set_speed(speed)),
             None => failure(id, "invalid_params", "A speed is required".to_string()),
         },
+        "player.setMuted" => match request.params.get("muted").and_then(Value::as_bool) {
+            Some(muted) => unit_result(id, player.set_muted(muted)),
+            None => failure(id, "invalid_params", "A muted flag is required".to_string()),
+        },
         "player.setResizeMode" => match string_param(&request.params, "mode") {
             Some(mode) => unit_result(
                 id,
@@ -1861,6 +1865,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         | "player.cycleAudio"
         | "player.cycleSubtitle"
         | "player.setSpeed"
+        | "player.setMuted"
         | "player.setResizeMode"
         | "player.setAudioTrack"
         | "player.setSubtitleTrack"
