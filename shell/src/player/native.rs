@@ -21,15 +21,14 @@ const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 /// mpv's geometry for each picture mode, matching the official client's
 /// `applyResizeMode`.
 ///
-/// Zoom is a half pan-and-scan, not a full one. Treating it as 1.0 — which is
-/// Fill — made the two modes identical and made Zoom crop far harder than it
-/// should, so cycling appeared not to work: two of the steps looked the same
-/// and the third was extreme.
+/// Official desktop does not expose Fill in its cycle. It treats a synced
+/// legacy Fill value as Zoom, and its native Windows and macOS bridges map
+/// both values to a full pan-and-scan. Keeping the alias here makes a fresh
+/// launch and a runtime mode change produce the same picture geometry.
 fn panscan_for(mode: ResizeMode) -> (&'static str, &'static str) {
     match mode {
         ResizeMode::Fit => ("yes", "0.0"),
-        ResizeMode::Zoom => ("yes", "0.5"),
-        ResizeMode::Fill => ("yes", "1.0"),
+        ResizeMode::Zoom | ResizeMode::Fill => ("yes", "1.0"),
         // The one the official client leaves to its surface rather than mpv;
         // on this shell mpv owns the surface, so the aspect lock comes off.
         ResizeMode::Stretch => ("no", "0.0"),
@@ -1002,6 +1001,14 @@ unsafe fn get_flag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picture_modes_match_the_official_desktop_bridge() {
+        assert_eq!(panscan_for(ResizeMode::Fit), ("yes", "0.0"));
+        assert_eq!(panscan_for(ResizeMode::Zoom), ("yes", "1.0"));
+        assert_eq!(panscan_for(ResizeMode::Fill), ("yes", "1.0"));
+        assert_eq!(panscan_for(ResizeMode::Stretch), ("no", "0.0"));
+    }
 
     #[test]
     fn mailbox_coalesces_slider_commands_to_the_latest_value() {
