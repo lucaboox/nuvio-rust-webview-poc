@@ -158,6 +158,8 @@ const player = {
       mediaId: source.mediaId,
       startPositionMs: source.startPositionMs ?? 0,
       requestHeaders: source.requestHeaders ?? {},
+      deviceLanguages: source.deviceLanguages ?? [],
+      contentLanguage: source.contentLanguage,
       // How the shell files what was watched. Without it playback works and
       // the history does not.
       progress: source.progress,

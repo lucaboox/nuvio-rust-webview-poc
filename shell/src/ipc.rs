@@ -1950,41 +1950,33 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     let languages = player_settings
                         .as_ref()
                         .map(|snapshot| {
-                            // "none", "device", "default", "original" and
-                            // "forced" are choices, not languages. Passing them
-                            // through as codes would have mpv looking for a
-                            // track tagged "none"; each is handled as a mode
-                            // instead, and "device"/"default"/"original" are
-                            // left to mpv's own selection because the shell has
-                            // nothing better to resolve them to.
-                            let codes = |first: &str, second: &str| {
-                                [first, second]
-                                    .into_iter()
-                                    .map(|value| value.trim().to_ascii_lowercase())
-                                    .filter(|value| {
-                                        !matches!(
-                                            value.as_str(),
-                                            "" | "none"
-                                                | "device"
-                                                | "default"
-                                                | "original"
-                                                | "forced"
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            };
+                            // The WebView knows the device locale and metadata
+                            // language. Resolve Device/Original like official
+                            // Nuvio instead of silently falling back to track 1.
+                            let device_languages = request.params
+                                .get("deviceLanguages")
+                                .and_then(Value::as_array)
+                                .map(|values| values.iter().filter_map(Value::as_str)
+                                    .map(str::to_string).collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let original = request.params.get("contentLanguage")
+                                .and_then(Value::as_str);
                             let subtitle_choice = snapshot
                                 .preferred_subtitle_language
                                 .trim()
                                 .to_ascii_lowercase();
                             crate::player::TrackLanguages {
-                                audio: codes(
+                                audio: crate::player::preferred_languages(
                                     &snapshot.preferred_audio_language,
                                     &snapshot.secondary_audio_language,
+                                    &device_languages,
+                                    original,
                                 ),
-                                subtitles: codes(
+                                subtitles: crate::player::preferred_languages(
                                     &snapshot.preferred_subtitle_language,
                                     &snapshot.secondary_subtitle_language,
+                                    &device_languages,
+                                    None,
                                 ),
                                 subtitles_off: subtitle_choice == "none",
                                 subtitles_forced_only: subtitle_choice == "forced",
