@@ -340,6 +340,19 @@ fn run_player(
         if languages.subtitles_only_preferred && !languages.subtitles.is_empty() {
             set_option(mpv_set_option_string, handle, "subs-fallback", "no")?;
         }
+        if languages.subtitles_off {
+            set_option(mpv_set_option_string, handle, "sid", "no")?;
+        } else if languages.subtitles_forced_only {
+            // The subtitle language itself set to "Forced": take a forced track
+            // over a full one wherever there is one.
+            set_option(mpv_set_option_string, handle, "subs-fallback-forced", "always")?;
+        }
+        // "Use forced subtitles": when the audio is already in a language you
+        // read, a full subtitle track is not wanted — but the forced one
+        // covering foreign dialogue still is, and mpv keeps selecting that.
+        if languages.forced_with_matching_audio {
+            set_option(mpv_set_option_string, handle, "subs-with-matching-audio", "no")?;
+        }
         set_option(mpv_set_option_string, handle, "keepaspect", keep_aspect)?;
         set_option(mpv_set_option_string, handle, "keepaspect-window", "no")?;
         set_option(mpv_set_option_string, handle, "video-aspect-override", "no")?;

@@ -1937,25 +1937,47 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     let languages = player_settings
                         .as_ref()
                         .map(|snapshot| {
-                            let list = |first: &str, second: &str| {
+                            // "none", "device", "default", "original" and
+                            // "forced" are choices, not languages. Passing them
+                            // through as codes would have mpv looking for a
+                            // track tagged "none"; each is handled as a mode
+                            // instead, and "device"/"default"/"original" are
+                            // left to mpv's own selection because the shell has
+                            // nothing better to resolve them to.
+                            let codes = |first: &str, second: &str| {
                                 [first, second]
                                     .into_iter()
-                                    .map(str::trim)
-                                    .filter(|value| !value.is_empty())
-                                    .map(str::to_string)
+                                    .map(|value| value.trim().to_ascii_lowercase())
+                                    .filter(|value| {
+                                        !matches!(
+                                            value.as_str(),
+                                            "" | "none"
+                                                | "device"
+                                                | "default"
+                                                | "original"
+                                                | "forced"
+                                        )
+                                    })
                                     .collect::<Vec<_>>()
                             };
+                            let subtitle_choice = snapshot
+                                .preferred_subtitle_language
+                                .trim()
+                                .to_ascii_lowercase();
                             crate::player::TrackLanguages {
-                                audio: list(
+                                audio: codes(
                                     &snapshot.preferred_audio_language,
                                     &snapshot.secondary_audio_language,
                                 ),
-                                subtitles: list(
+                                subtitles: codes(
                                     &snapshot.preferred_subtitle_language,
                                     &snapshot.secondary_subtitle_language,
                                 ),
+                                subtitles_off: subtitle_choice == "none",
+                                subtitles_forced_only: subtitle_choice == "forced",
                                 subtitles_only_preferred: snapshot
                                     .subtitle_preferred_languages_only,
+                                forced_with_matching_audio: snapshot.subtitle_forced_only,
                             }
                         })
                         .unwrap_or_default();

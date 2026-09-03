@@ -18,11 +18,23 @@ pub use native::find_mpv;
 #[derive(Clone, Debug, Default)]
 pub struct TrackLanguages {
     /// Preferred first, then the secondary, as mpv reads them left to right.
+    /// Real ISO codes only — the sentinels below are stripped by the caller,
+    /// because mpv would otherwise hunt for a track tagged "none".
     pub audio: Vec<String>,
     pub subtitles: Vec<String>,
+    /// Subtitle language set to "Off".
+    pub subtitles_off: bool,
+    /// Subtitle language set to "Forced": prefer a forced track outright.
+    pub subtitles_forced_only: bool,
     /// Nuvio's "only preferred languages": with nothing matching, show none
     /// rather than falling back to a language that was not asked for.
     pub subtitles_only_preferred: bool,
+    /// Nuvio's "Use forced subtitles" — "prefer forced subtitles when audio
+    /// matches the subtitle language; if unavailable, select nothing". That is
+    /// mpv's `subs-with-matching-audio` exactly: when the audio is already in a
+    /// language you read, a full subtitle track is not wanted, but the forced
+    /// one covering foreign dialogue still is.
+    pub forced_with_matching_audio: bool,
 }
 
 /// Subtitle appearance pushed into mpv at load time. Kept separate from the
