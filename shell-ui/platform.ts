@@ -182,10 +182,27 @@ const player = {
   stop: () => invoke<unknown>("player.stop").then(() => undefined),
 };
 
+/**
+ * The episode-ratings service, called directly rather than through the Worker.
+ *
+ * The Worker is there because a browser cannot reach that service at all, and
+ * it enforces an origin allowlist to stop anyone else spending its budget. This
+ * shell has no origin to offer — every request it sent was refused with a 403,
+ * which is why episode scores were blank here — and it does not need the proxy
+ * in the first place, because Rust does the asking.
+ *
+ * Compiled in, so an installation without the address configured simply falls
+ * back to the Worker rather than losing the badges.
+ */
+const ratingsBase = (
+  import.meta.env.VITE_NUVIO_IMDB_RATINGS_BASE_URL ?? ""
+).trim().replace(/\/+$/, "");
+
 export const platform: Platform = {
   auth,
   player,
   downloads,
+  ratings: ratingsBase ? { seasonRatingsBase: ratingsBase } : undefined,
   /**
    * Reachable from here, unlike from a page.
    *

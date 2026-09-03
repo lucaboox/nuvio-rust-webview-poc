@@ -55,6 +55,17 @@ const BACKEND_KEYS = [
   "NUVIO_SUPABASE_ANON_KEY",
 ];
 
+/**
+ * Forwarded when present, never warned about when absent.
+ *
+ * `NUVIO_IMDB_RATINGS_BASE_URL` is the episode-ratings service, and is only
+ * meaningful to a shell: a browser cannot call it, which is the whole reason
+ * the Cloudflare Worker exists. Given one, this client asks the service itself
+ * and leaves the Worker's budget to the clients that have no choice. Without
+ * one the app still works and simply goes through the Worker like a browser.
+ */
+const OPTIONAL_KEYS = ["NUVIO_IMDB_RATINGS_BASE_URL"];
+
 function backendEnv() {
   const file = join(root, ".env.local");
   const found = {};
@@ -64,7 +75,7 @@ function backendEnv() {
       if (match) found[match[1]] = match[2].replace(/^["']|["']$/g, "");
     }
   }
-  for (const key of BACKEND_KEYS)
+  for (const key of [...BACKEND_KEYS, ...OPTIONAL_KEYS])
     if (!found[key] && process.env[key]) found[key] = process.env[key];
 
   if (!found.NUVIO_SUPABASE_URL || !found.NUVIO_SUPABASE_ANON_KEY) {
