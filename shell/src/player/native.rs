@@ -349,9 +349,27 @@ fn run_player(
         }
         // "Use forced subtitles": when the audio is already in a language you
         // read, a full subtitle track is not wanted — but the forced one
-        // covering foreign dialogue still is, and mpv keeps selecting that.
-        if languages.forced_with_matching_audio {
-            set_option(mpv_set_option_string, handle, "subs-with-matching-audio", "no")?;
+        // covering foreign dialogue still is.
+        //
+        // `forced`, not `no`. They are different answers to the same question:
+        // `no` selects nothing at all when the audio matches, which throws away
+        // the forced track this setting exists to keep, while `forced` selects
+        // only that one and falls back to nothing — which is the setting's own
+        // description word for word.
+        //
+        // Not fatal if the value is refused: this is a subtitle preference, and
+        // an older libmpv that only knows the yes/no form should not stop the
+        // film from playing.
+        if languages.forced_with_matching_audio
+            && set_option(
+                mpv_set_option_string,
+                handle,
+                "subs-with-matching-audio",
+                "forced",
+            )
+            .is_err()
+        {
+            let _ = set_option(mpv_set_option_string, handle, "subs-with-matching-audio", "no");
         }
         set_option(mpv_set_option_string, handle, "keepaspect", keep_aspect)?;
         set_option(mpv_set_option_string, handle, "keepaspect-window", "no")?;
