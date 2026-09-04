@@ -160,11 +160,14 @@ const player = {
       requestHeaders: source.requestHeaders ?? {},
       deviceLanguages: source.deviceLanguages ?? [],
       contentLanguage: source.contentLanguage,
+      preferences: source.preferences,
       // How the shell files what was watched. Without it playback works and
       // the history does not.
       progress: source.progress,
     }).then(() => undefined),
   state: () => invoke<PlayerState>("player.state"),
+  skipSegments: (options: { contentId: string; videoId: string; season?: number; episode?: number; animeSkipEnabled: boolean; animeSkipClientId: string }) =>
+    invoke<{ segments: Array<{ startMs: number; endMs: number; type: string; provider: string }> }>("player.skipSegments", options).then((result) => result.segments),
   togglePause: () => invoke<unknown>("player.togglePause").then(() => undefined),
   seek: (positionMs: number) =>
     invoke<unknown>("player.seek", { positionMs }).then(() => undefined),

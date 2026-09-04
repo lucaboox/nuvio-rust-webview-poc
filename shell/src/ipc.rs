@@ -479,7 +479,7 @@ pub fn handle_content_shared(
             .get("episode")
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let (cached, options) = {
+        let (cached, mut options) = {
             let state = shared_state.lock().ok()?;
             let cached = state
                 .downloads
@@ -488,6 +488,12 @@ pub fn handle_content_shared(
                 .cached_segments(content_id, video_id, season, episode);
             (cached, state.skip_options())
         };
+        if let Some(enabled) = request.params.get("animeSkipEnabled").and_then(Value::as_bool) {
+            options.anime_skip_enabled = enabled;
+        }
+        if let Some(client_id) = string_param(&request.params, "animeSkipClientId") {
+            options.anime_skip_client_id = client_id.to_string();
+        }
         let segments = cached.unwrap_or_else(|| {
             crate::skip_segments::resolve_with_options(
                 content_id, video_id, season, episode, &options,
@@ -2026,7 +2032,12 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     // Player settings are already cached during account/profile
                     // bootstrap. Applying that snapshot avoids a network read on
                     // every stream start and keeps RTX VSR in sync with the UI.
-                    let player_settings = state.settings_snapshot.clone().or_else(|| {
+                    let player_settings = request.params.get("preferences")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|preferences| crate::settings::playback_snapshot(
+                            state.settings_blob.as_ref(), preferences,
+                        ))
+                        .or_else(|| state.settings_snapshot.clone()).or_else(|| {
                         crate::settings::load(&state.auth, state.active_profile_index)
                             .ok()
                             .map(|(snapshot, _)| snapshot)

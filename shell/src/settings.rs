@@ -891,6 +891,52 @@ pub fn update_cached(
     Ok((snapshot(&blob), blob))
 }
 
+/// Read-only launch overrides from the shared UI. Its auth transport writes
+/// settings independently of the legacy shell cache. Restrict this to player
+/// preferences and never persist the merged value or touch another feature.
+pub(crate) fn playback_snapshot(base: Option<&Value>, preferences: &serde_json::Map<String, Value>) -> SettingsSnapshot {
+    let mut features = base.and_then(|blob| blob.get("features")).and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut player = features.get("player_settings").and_then(Value::as_object).cloned().unwrap_or_default();
+    for key in [
+        "resize_mode", "preferred_audio_language", "secondary_preferred_audio_language",
+        "preferred_subtitle_language", "secondary_preferred_subtitle_language",
+        "subtitle_text_color", "subtitle_background_color", "subtitle_outline_color",
+        "subtitle_font_size_sp", "subtitle_bottom_offset", "subtitle_outline_width",
+        "subtitle_bold", "subtitle_outline_enabled", "subtitle_use_forced_subtitles",
+        "subtitle_show_only_preferred_languages", "use_libass",
+    ] {
+        if let Some(value) = preferences.get(key) { player.insert(key.to_string(), value.clone()); }
+    }
+    features.insert("player_settings".to_string(), Value::Object(player));
+    snapshot(&json!({ "version": 3, "features": features }))
+}
+
+#[cfg(test)]
+mod playback_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn current_ui_preferences_override_stale_cache_without_mutating_it() {
+        let base = json!({"features":{"player_settings":{
+            "subtitle_bold":{"type":"boolean","value":false},
+            "nvidia_rtx_super_resolution_enabled":{"type":"boolean","value":true}
+        }}});
+        let original = base.clone();
+        let preferences = json!({
+            "subtitle_bold":{"type":"boolean","value":true},
+            "use_libass":{"type":"boolean","value":true},
+            "preferred_audio_language":{"type":"string","value":"en"},
+            "nvidia_rtx_super_resolution_enabled":{"type":"boolean","value":false}
+        });
+        let result = playback_snapshot(Some(&base), preferences.as_object().unwrap());
+        assert!(result.subtitle_bold);
+        assert!(result.use_libass);
+        assert_eq!(result.preferred_audio_language, "en");
+        assert!(result.rtx_super_resolution);
+        assert_eq!(base, original);
+    }
+}
+
 pub(crate) fn snapshot(blob: &Value) -> SettingsSnapshot {
     let continue_watching = normalized_continue_watching_payload(&continue_watching_payload(blob));
     SettingsSnapshot {
