@@ -125,12 +125,12 @@ const auth = {
       key: backend.key,
       selfHosted: backend.selfHosted,
     })
-      .then(() => invoke<ShellAccount>("auth.signIn", { email, password }))
+      .then(() => invoke<ShellAccount>("auth.signIn", { email, password, sharedUi: true }))
       .then(toSession),
   // Restores rather than reports. `auth.state` answers with whatever session
   // is loaded, which on a fresh launch is none — the shell has to be asked to
   // rotate the stored credential first.
-  restore: () => invoke<ShellAccount>("auth.restore").then(toSession),
+  restore: () => invoke<ShellAccount>("auth.restore", { sharedUi: true }).then(toSession),
   signOut: () => invoke<unknown>("auth.signOut").then(() => undefined),
   request: <T>(
     path: string,

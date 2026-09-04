@@ -12,6 +12,130 @@ use crate::app_state::AppState;
 
 const SETTINGS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
+pub(crate) struct StartupReads {
+    created: std::time::Instant,
+    entries: std::collections::HashMap<String, Value>,
+}
+
+impl StartupReads {
+    fn key(path: &str, init: &Value) -> Option<String> {
+        // Custom headers can change the result (e.g. a range); do not reuse it.
+        if init.get("headers").and_then(Value::as_object).is_some_and(|v| !v.is_empty()) {
+            return None;
+        }
+        let method = init.get("method").and_then(Value::as_str).unwrap_or("GET").to_ascii_uppercase();
+        let body = match init.get("body").and_then(Value::as_str) {
+            Some(body) => serde_json::from_str::<Value>(body).ok()?,
+            None => Value::Null,
+        };
+        Some(format!("{method} {path} {body}"))
+    }
+
+    fn insert(&mut self, path: &str, init: Value, value: Value) {
+        if let Some(key) = Self::key(path, &init) { self.entries.insert(key, value); }
+    }
+
+    fn take(&mut self, params: &Value) -> Option<Value> {
+        if self.created.elapsed() > std::time::Duration::from_secs(15) {
+            self.entries.clear();
+            return None;
+        }
+        let path = params.get("path")?.as_str()?;
+        let init = params.get("init").cloned().unwrap_or_else(|| json!({}));
+        self.entries.remove(&Self::key(path, &init)?)
+    }
+}
+
+fn prime_startup_reads(state: &mut AppState) {
+    let mut reads = StartupReads {
+        created: std::time::Instant::now(),
+        entries: Default::default(),
+    };
+    // Reconstruct only the exact RPC/table reads the shared UI makes. No
+    // credentials, watch history, deltas or mutations are cached here.
+    reads.insert("/rest/v1/rpc/sync_pull_profiles", json!({"method":"POST", "body":"{}"}),
+        json!(state.profiles.iter().map(|p| json!({
+            "id":p.id, "user_id":p.user_id, "profile_index":p.profile_index,
+            "name":p.name, "avatar_color_hex":p.avatar_color_hex,
+            "avatar_id":p.avatar_id, "avatar_url":p.avatar_url,
+            "uses_primary_addons":p.uses_primary_addons,
+            "uses_primary_plugins":p.uses_primary_plugins, "pin_enabled":p.pin_enabled,
+        })).collect::<Vec<_>>()));
+    reads.insert(&format!("/rest/v1/addons?profile_id=eq.{}&select=url%2Cname%2Cenabled%2Csort_order&order=sort_order.asc", state.effective_addon_profile_id()),
+        json!({}), json!(state.addons.iter().map(|a| json!({
+            "url":a.url, "name":a.name, "enabled":a.enabled, "sort_order":a.sort_order,
+        })).collect::<Vec<_>>()));
+    if let Some(blob) = &state.settings_blob {
+        reads.insert("/rest/v1/rpc/sync_pull_profile_settings_blob", json!({
+            "method":"POST", "body":json!({"p_profile_id":state.active_profile_index,"p_platform":"desktop"}).to_string(),
+        }), json!([{"settings_json":blob}]));
+    }
+    state.startup_reads = Some(reads);
+}
+
+/// The shared UI uses these methods, not the legacy content.* dispatcher.
+/// Never hold AppState during network I/O: otherwise its parallel startup
+/// requests become one queue behind the slowest addon/history request.
+pub fn handle_network_shared(
+    raw: &str,
+    shared: &Arc<Mutex<AppState>>,
+) -> Option<Vec<OutboundMessage>> {
+    let request = serde_json::from_str::<RequestEnvelope>(raw).ok()?;
+    let response = match request.method.as_str() {
+        "http.request" => http_response(&request),
+        "auth.request" => {
+            // Clones share token rotation/revocation locks in AuthService.
+            // No credentials cross IPC, and no captured state is written back.
+            let auth = match shared.lock() {
+                Ok(mut state) => {
+                    let path = string_param(&request.params, "path").unwrap_or_default();
+                    let method = request.params.get("init").and_then(|init| init.get("method"))
+                        .and_then(Value::as_str).unwrap_or("GET");
+                    if path.contains("/sync_push_") || matches!(method, "PATCH" | "DELETE") {
+                        state.startup_reads = None;
+                    }
+                    if let Some(value) = state.startup_reads.as_mut().and_then(|reads| reads.take(&request.params)) {
+                        return Some(vec![OutboundMessage::Response(success(request.id, value))]);
+                    }
+                    state.auth.clone()
+                },
+                Err(_) => return Some(vec![OutboundMessage::Response(failure(
+                    request.id, "account_unavailable", "Account lock was interrupted".into(),
+                ))]),
+            };
+            account_response(&request, &auth)
+        }
+        _ => return None,
+    };
+    Some(vec![OutboundMessage::Response(response)])
+}
+
+fn http_response(request: &RequestEnvelope) -> ResponseEnvelope {
+    let id = request.id.clone();
+    match serde_json::from_value::<crate::http::HttpRequest>(request.params.clone()) {
+        Ok(input) => match crate::http::request(input) {
+            Ok(response) => success(id, json!(response)),
+            Err(error) => failure(id, "request_failed", error.to_string()),
+        },
+        Err(error) => failure(id, "request_invalid", error.to_string()),
+    }
+}
+
+fn account_response(request: &RequestEnvelope, auth: &crate::auth::AuthService) -> ResponseEnvelope {
+    let path = string_param(&request.params, "path").unwrap_or_default();
+    let init = request.params.get("init").cloned().unwrap_or_else(|| json!({}));
+    let method = init.get("method").and_then(Value::as_str).unwrap_or("GET");
+    let body = init.get("body").and_then(Value::as_str).map(str::to_string);
+    let headers = init.get("headers").and_then(Value::as_object)
+        .map(|map| map.iter().filter_map(|(name, value)| {
+            value.as_str().map(|text| (name.clone(), text.to_string()))
+        }).collect()).unwrap_or_default();
+    match auth.authorized_request(path, method, body, headers) {
+        Ok(value) => success(request.id.clone(), value),
+        Err(error) => failure(request.id.clone(), "account_request_failed", error.to_string()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProgressCheckpoint {
     position_ms: i64,
@@ -658,6 +782,11 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
     };
 
     let id = request.id.clone();
+    if request.method.starts_with("auth.") && !matches!(request.method.as_str(), "auth.request" | "auth.state") {
+        // A one-shot bootstrap snapshot must never survive logout, backend
+        // reconfiguration, or another sign-in (even to the same account).
+        state.startup_reads = None;
+    }
     if request.method == "app.bootstrap" {
         let _ = state.restore_saved_account();
     }
@@ -687,17 +816,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         ),
         // The shared UI's `platform.request`. Stateless, so it sits with the
         // other calls that need nothing but their parameters.
-        "http.request" => match serde_json::from_value::<crate::http::HttpRequest>(
-            request.params.clone(),
-        ) {
-            Ok(input) => match crate::http::request(input) {
-                Ok(response) => success(id, json!(response)),
-                // A host that refused is reported through the response, not
-                // here: only a request that never completed is an error.
-                Err(error) => failure(id, "request_failed", error.to_string()),
-            },
-            Err(error) => failure(id, "request_invalid", error.to_string()),
-        },
+        "http.request" => http_response(&request),
         "ui.ping" => {
             state.ping_count += 1;
             success(
@@ -712,31 +831,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         "auth.state" => success(id, account_payload(state, None)),
         // The shared UI's `auth.request`: it names a path, the shell signs and
         // sends it. No token crosses back.
-        "auth.request" => {
-            let path = string_param(&request.params, "path").unwrap_or_default().to_string();
-            let init = request.params.get("init").cloned().unwrap_or_else(|| json!({}));
-            let method = init
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("GET")
-                .to_string();
-            let body = init.get("body").and_then(Value::as_str).map(str::to_string);
-            let headers = init
-                .get("headers")
-                .and_then(Value::as_object)
-                .map(|map| {
-                    map.iter()
-                        .filter_map(|(name, value)| {
-                            value.as_str().map(|text| (name.clone(), text.to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            match state.auth.authorized_request(&path, &method, body, headers) {
-                Ok(value) => success(id, value),
-                Err(error) => failure(id, "account_request_failed", error.to_string()),
-            }
-        }
+        "auth.request" => account_response(&request, &state.auth),
         "auth.configureBackend" => {
             let self_hosted = request.params.get("selfHosted").and_then(Value::as_bool);
             match self_hosted {
@@ -785,6 +880,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                     .refresh_account_data()
                     .err()
                     .map(|error| error.to_string());
+                if warning.is_none() && request.params.get("sharedUi").and_then(Value::as_bool) == Some(true) {
+                    prime_startup_reads(state);
+                }
                 success(id, account_payload(state, warning))
             }
             Ok(false) => failure(
@@ -802,6 +900,9 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
                         .refresh_account_data()
                         .err()
                         .map(|error| error.to_string());
+                    if warning.is_none() && request.params.get("sharedUi").and_then(Value::as_bool) == Some(true) {
+                        prime_startup_reads(state);
+                    }
                     success(id, account_payload(state, warning))
                 }
                 Err(error) => failure(id, "auth_failed", error.to_string()),
@@ -2221,6 +2322,56 @@ fn failure(id: String, code: &'static str, message: String) -> ResponseEnvelope 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_reads_are_one_shot_profile_scoped_and_expire() {
+        let mut reads = StartupReads { created: std::time::Instant::now(), entries: Default::default() };
+        let path = "/rest/v1/rpc/sync_pull_profile_settings_blob";
+        reads.insert(path, json!({"method":"POST","body":"{\"p_profile_id\":1,\"p_platform\":\"desktop\"}"}), json!([{"settings_json":{}}]));
+        let request = |profile, platform| json!({"path":path,"init":{"method":"POST","body":json!({"p_platform":platform,"p_profile_id":profile}).to_string(),"headers":{}}});
+        assert!(reads.take(&request(2, "desktop")).is_none());
+        assert!(reads.take(&request(1, "mobile")).is_none());
+        assert!(reads.take(&request(1, "desktop")).is_some());
+        assert!(reads.take(&request(1, "desktop")).is_none());
+        reads.insert("/profiles", json!({}), json!([]));
+        reads.created = std::time::Instant::now() - std::time::Duration::from_secs(16);
+        assert!(reads.take(&json!({"path":"/profiles"})).is_none());
+    }
+
+    #[test]
+    fn startup_snapshot_preserves_profile_fields_and_addon_priority() {
+        let mut state = AppState::default();
+        state.profiles = serde_json::from_value(json!([{
+            "profile_index":1,"name":"Test","avatar_id":"avatar","avatar_url":"https://example.invalid/avatar.png",
+            "pin_enabled":true,"uses_primary_addons":true
+        }])).unwrap();
+        state.addons = serde_json::from_value(json!([{"url":"https://example.invalid/manifest.json","name":"Addon","enabled":true,"sort_order":3}])).unwrap();
+        prime_startup_reads(&mut state);
+        let reads = state.startup_reads.as_mut().unwrap();
+        let profiles = reads.take(&json!({"path":"/rest/v1/rpc/sync_pull_profiles","init":{"method":"POST","body":"{}"}})).unwrap();
+        assert_eq!(profiles[0]["avatar_id"], "avatar");
+        assert_eq!(profiles[0]["pin_enabled"], true);
+        let addons = reads.take(&json!({"path":"/rest/v1/addons?profile_id=eq.1&select=url%2Cname%2Cenabled%2Csort_order&order=sort_order.asc"})).unwrap();
+        assert_eq!(addons[0]["sort_order"], 3);
+        handle(r#"{"id":"reset","method":"auth.configureBackend","params":{}}"#, &mut state);
+        assert!(state.startup_reads.is_none());
+    }
+
+    #[test]
+    fn generic_http_does_not_wait_for_the_global_app_lock() {
+        let shared = Arc::new(Mutex::new(AppState::default()));
+        let guard = shared.lock().unwrap();
+        let worker_state = Arc::clone(&shared);
+        let (send, receive) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = handle_network_shared(r#"{"id":"network","method":"http.request","params":{"url":"file:///not-allowed"}}"#, &worker_state);
+            send.send(result.is_some()).unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), true);
+    }
 
     #[test]
     fn ping_round_trip_is_correlated_and_counted() {

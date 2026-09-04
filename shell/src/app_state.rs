@@ -54,6 +54,8 @@ pub struct AppState {
     /// finish, so when that is slow the only useful question is which one.
     pub boot_timings: Vec<(&'static str, u128)>,
     pub session_restore_attempted: bool,
+    /// One-shot reuse of the reads already completed by native sign-in/restore.
+    pub startup_reads: Option<crate::ipc::StartupReads>,
 }
 
 impl Default for AppState {
@@ -78,6 +80,7 @@ impl Default for AppState {
             home_layout_generation: 0,
             boot_timings: Vec::new(),
             session_restore_attempted: false,
+            startup_reads: None,
         }
     }
 }

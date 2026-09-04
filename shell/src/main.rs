@@ -94,6 +94,9 @@ async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value
 /// tears down its own runtime. Keep the async bridge responsive and isolate
 /// that work on the runtime's blocking pool.
 fn dispatch_bridge(raw: &str, shared: &SharedState) -> Vec<Value> {
+    if let Some(messages) = ipc::handle_network_shared(raw, shared) {
+        return messages.into_iter().map(to_value).collect();
+    }
     let messages = match ipc::handle_updates_shared(raw) {
         Some(messages) => messages,
         None => match ipc::handle_player_shared(&raw, shared) {
