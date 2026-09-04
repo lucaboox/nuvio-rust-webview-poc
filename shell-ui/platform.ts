@@ -12,6 +12,9 @@
  */
 
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import { invoke } from "./bridge.ts";
 import { copyStreamUrl } from "../shared-ui/src/lib/externalPlayer.ts";
 import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
@@ -207,6 +210,51 @@ const ratingsBase = (
   import.meta.env.VITE_NUVIO_IMDB_RATINGS_BASE_URL ?? ""
 ).trim().replace(/\/+$/, "");
 
+/**
+ * The real application update, which the browser's service worker cannot be.
+ *
+ * The signed feed, the pubkey and the release workflow were all still in place
+ * — only the screen that drove them went, with the old `ui/` tree. This puts
+ * the same three steps behind the capability so the shared Settings control
+ * works here without knowing any of it: ask, download, restart.
+ *
+ * The `Update` handle from `check()` is held between the two calls because
+ * `downloadAndInstall` belongs to it; asking twice would download twice.
+ */
+let pendingUpdate: Awaited<ReturnType<typeof check>> = null;
+
+const updates = {
+  currentVersion: () => getVersion(),
+  check: async () => {
+    pendingUpdate = await check();
+    return pendingUpdate
+      ? {
+          version: pendingUpdate.version,
+          notes: pendingUpdate.body ?? undefined,
+          date: pendingUpdate.date ?? undefined,
+        }
+      : null;
+  },
+  install: async (onProgress?: (fraction: number) => void) => {
+    const update = pendingUpdate ?? (await check());
+    if (!update) return;
+    pendingUpdate = update;
+    let total = 0;
+    let received = 0;
+    await update.downloadAndInstall((event) => {
+      // The feed does not always declare a length; without one there is no
+      // fraction to report and the caller shows an indeterminate wait rather
+      // than a bar that never moves.
+      if (event.event === "Started") total = event.data.contentLength ?? 0;
+      else if (event.event === "Progress") {
+        received += event.data.chunkLength;
+        if (total > 0) onProgress?.(Math.min(1, received / total));
+      } else if (event.event === "Finished") onProgress?.(1);
+    });
+  },
+  relaunch: () => relaunch(),
+};
+
 export const platform: Platform = {
   auth,
   player,
@@ -245,6 +293,7 @@ export const platform: Platform = {
       },
     ],
   },
+  updates,
   request,
   // The webview has IndexedDB like any other, so the browser's implementation
   // is reused rather than reimplemented over the bridge. What belongs in files
