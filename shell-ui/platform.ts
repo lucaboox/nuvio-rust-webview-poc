@@ -192,6 +192,25 @@ const player = {
   setFullscreen: (fullscreen: boolean) =>
     invoke<unknown>("window.setFullscreen", { enabled: fullscreen }).then(() => undefined),
   stop: () => invoke<unknown>("player.stop").then(() => undefined),
+  /*
+   * RTX Video Super Resolution, which the Rust side already applies from the
+   * shared settings blob — this is only what puts the switch on the screen.
+   *
+   * Declared here rather than discovered by the UI: the settings page must not
+   * ask what it is running on. The native player is `cfg(windows)` and the
+   * pipeline is d3d11, so nowhere else can offer this, and the browser build
+   * simply omits the field.
+   *
+   * `appliesToCurrentPlayback` is false because `gpu-api` and `d3d11-adapter`
+   * are read once, before mpv initialises. The filter itself could be added
+   * mid-playback, but only in a session that already started on d3d11 with the
+   * NVIDIA adapter — so a toggle would work or not depending on how playback
+   * began, which is worse than saying plainly that it takes effect next time.
+   */
+  videoEnhancement: {
+    kind: "rtx-super-resolution" as const,
+    appliesToCurrentPlayback: false,
+  },
 };
 
 /**
