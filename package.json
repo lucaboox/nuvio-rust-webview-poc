@@ -4,6 +4,8 @@
   "version": "0.1.0-alpha.5",
   "type": "module",
   "scripts": {
+    "dlss5:check": "node scripts/check-dlss5.mjs",
+    "test:dlss5": "node --test scripts/check-dlss5.test.mjs",
     "prepare:runtime": "node scripts/prepare-libmpv.mjs",
     "build:shared-ui": "node scripts/build-shared-ui.mjs",
     "check:shell-ui": "tsc",
