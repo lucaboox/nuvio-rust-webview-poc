@@ -114,6 +114,21 @@ pub struct PlayerState {
     pub warning: Option<String>,
     /// Audio and subtitle tracks reported by mpv, for the in-player pickers.
     pub tracks: Vec<PlayerTrack>,
+    pub diagnostics: Option<PlayerDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerDiagnostics {
+    pub rtx_requested: bool,
+    pub gpu_api: Option<String>,
+    pub hardware_decoder: Option<String>,
+    pub video_filters: Option<String>,
+    pub video_codec: Option<String>,
+    pub source_width: Option<i64>,
+    pub source_height: Option<i64>,
+    pub output_width: Option<i64>,
+    pub output_height: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

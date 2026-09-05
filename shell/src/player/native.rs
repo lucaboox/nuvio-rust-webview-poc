@@ -699,6 +699,19 @@ fn run_player(
                     };
                 }
                 let is_paused = paused != 0;
+                // Read actual decoder/filter output, rather than presenting the
+                // user's RTX preference as proof that enhancement is active.
+                let diagnostics = super::PlayerDiagnostics {
+                    rtx_requested: rtx_super_resolution,
+                    gpu_api: get_string(mpv_get_property, mpv_free, handle, "gpu-api"),
+                    hardware_decoder: get_string(mpv_get_property, mpv_free, handle, "hwdec-current"),
+                    video_filters: get_string(mpv_get_property, mpv_free, handle, "vf"),
+                    video_codec: get_string(mpv_get_property, mpv_free, handle, "video-codec"),
+                    source_width: get_int(mpv_get_property, handle, "video-dec-params/w"),
+                    source_height: get_int(mpv_get_property, handle, "video-dec-params/h"),
+                    output_width: get_int(mpv_get_property, handle, "video-out-params/w"),
+                    output_height: get_int(mpv_get_property, handle, "video-out-params/h"),
+                };
                 if is_paused && !was_paused {
                     pause_checkpoint_pending = true;
                 } else if !is_paused {
@@ -734,6 +747,7 @@ fn run_player(
                 if let Ok(mut current) = state.lock() {
                     current.active = true;
                     current.paused = is_paused;
+                    current.diagnostics = Some(diagnostics);
                     current.position_ms = position_ms;
                     current.duration_ms = duration_ms;
                     current.volume = volume.round() as i64;
