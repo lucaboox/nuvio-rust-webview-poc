@@ -903,7 +903,7 @@ pub(crate) fn playback_snapshot(base: Option<&Value>, preferences: &serde_json::
         "subtitle_text_color", "subtitle_background_color", "subtitle_outline_color",
         "subtitle_font_size_sp", "subtitle_bottom_offset", "subtitle_outline_width",
         "subtitle_bold", "subtitle_outline_enabled", "subtitle_use_forced_subtitles",
-        "subtitle_show_only_preferred_languages", "use_libass",
+        "subtitle_show_only_preferred_languages", "use_libass", "nvidia_rtx_super_resolution_enabled",
     ] {
         if let Some(value) = preferences.get(key) { player.insert(key.to_string(), value.clone()); }
     }
@@ -932,8 +932,24 @@ mod playback_snapshot_tests {
         assert!(result.subtitle_bold);
         assert!(result.use_libass);
         assert_eq!(result.preferred_audio_language, "en");
-        assert!(result.rtx_super_resolution);
+        assert!(!result.rtx_super_resolution);
         assert_eq!(base, original);
+    }
+
+    #[test]
+    fn rtx_launch_preference_overrides_both_stale_states_and_an_empty_cache() {
+        for enabled in [true, false] {
+            let base = json!({"features":{"player_settings":{
+                "nvidia_rtx_super_resolution_enabled":{"type":"boolean","value":!enabled}
+            }}});
+            let preferences = json!({
+                "nvidia_rtx_super_resolution_enabled":{"type":"boolean","value":enabled}
+            });
+            for cached in [Some(&base), None] {
+                assert_eq!(playback_snapshot(cached, preferences.as_object().unwrap()).rtx_super_resolution, enabled);
+            }
+            assert_eq!(playback_snapshot(Some(&base), &serde_json::Map::new()).rtx_super_resolution, !enabled);
+        }
     }
 }
 
