@@ -19,6 +19,10 @@ jobs:
       NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The interface is a submodule. Without this the checkout leaves it
+          # empty and the build fails on a missing package.json.
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:
@@ -53,8 +57,8 @@ jobs:
           if (-not $env:NUVIO_SUPABASE_URL -or -not $env:NUVIO_SUPABASE_ANON_KEY) {
             throw "Configure NUVIO_SUPABASE_URL and NUVIO_SUPABASE_ANON_KEY repository variables before publishing"
           }
-          npm run check:ui
-          npm run build:ui
+          npm run check:shell-ui
+          npm run build:shared-ui
           npm run release:notes
           cargo test --manifest-path shell/Cargo.toml --locked
 

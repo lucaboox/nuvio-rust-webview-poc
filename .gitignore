@@ -10,3 +10,6 @@ shell/gen/schemas/
 .env.local
 poc.stdout.log
 poc.stderr.log
+
+# Lives on codex/dlss5-experiment; its build output is not this repository.
+dlss5-probe/
