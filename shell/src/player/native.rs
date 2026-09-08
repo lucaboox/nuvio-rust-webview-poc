@@ -80,6 +80,8 @@ pub enum PlayerCommand {
     CycleSubtitle,
     SetAudio(i64),
     SetSubtitle(i64),
+    /// How captions look, restated while a file is already open.
+    SetSubtitleStyle(SubtitleStyle),
     SetSpeed(f64),
     SetResizeMode(ResizeMode),
     Stop,
@@ -95,6 +97,7 @@ struct PendingCommands {
     muted: Option<bool>,
     audio: Option<PlayerCommand>,
     subtitle: Option<PlayerCommand>,
+    subtitle_style: Option<SubtitleStyle>,
     speed: Option<f64>,
     resize_mode: Option<ResizeMode>,
 }
@@ -136,6 +139,7 @@ impl PlayerCommands {
             command @ (PlayerCommand::CycleSubtitle | PlayerCommand::SetSubtitle(_)) => {
                 pending.subtitle = Some(command);
             }
+            PlayerCommand::SetSubtitleStyle(style) => pending.subtitle_style = Some(style),
             PlayerCommand::SetSpeed(value) => pending.speed = Some(value),
             PlayerCommand::SetResizeMode(mode) => pending.resize_mode = Some(mode),
         }
@@ -170,6 +174,9 @@ impl PlayerCommands {
         }
         if let Some(command) = pending.subtitle.take() {
             commands.push(command);
+        }
+        if let Some(style) = pending.subtitle_style.take() {
+            commands.push(PlayerCommand::SetSubtitleStyle(style));
         }
         if let Some(value) = pending.speed.take() {
             commands.push(PlayerCommand::SetSpeed(value));
@@ -519,6 +526,11 @@ fn run_player(
         // in this thread so every such transition ends with the intended
         // geometry instead of depending on when the web-side poll happens.
         let mut current_resize_mode = resize_mode;
+        // Whether styled ASS tracks keep their own formatting is an account
+        // setting decided when the file opened, not something the caption
+        // panel changes. Retained here so a restyle from the player cannot
+        // quietly turn it off.
+        let opened_with_libass = subtitle_style.use_libass;
         while !stopped {
             let mut message: MSG = std::mem::zeroed();
             while PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -583,6 +595,17 @@ fn run_player(
                             4,
                             &["set", "sid", &track_value(id)],
                         );
+                    }
+                    PlayerCommand::SetSubtitleStyle(ref style) => {
+                        // Properties, not options: options are what a handle
+                        // takes before it is initialised, and this arrives
+                        // while a file is playing. The two setters have the
+                        // same shape, so the one routine serves both.
+                        let live = SubtitleStyle {
+                            use_libass: opened_with_libass,
+                            ..style.clone()
+                        };
+                        let _ = apply_subtitle_style(mpv_set_property_string, handle, &live);
                     }
                     PlayerCommand::SetSpeed(speed) => {
                         let _ = command_async(

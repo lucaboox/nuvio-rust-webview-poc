@@ -315,6 +315,14 @@ impl PlayerService {
     pub fn set_subtitle_track(&self, id: i64) -> anyhow::Result<()> {
         self.send(native::PlayerCommand::SetSubtitle(id))
     }
+    /// How captions look, restated while a file is already open.
+    ///
+    /// The same values the load path applies, so a style chosen from the
+    /// player and one carried in from the account's settings arrive as the
+    /// same set of mpv properties.
+    pub fn set_subtitle_style(&self, style: SubtitleStyle) -> anyhow::Result<()> {
+        self.send(native::PlayerCommand::SetSubtitleStyle(style))
+    }
     /// The stream currently loaded, for callers that need to open it
     /// independently of playback.
     pub fn source(&self) -> Option<(String, Vec<String>)> {

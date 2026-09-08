@@ -450,6 +450,14 @@ fn handle_player_command(
             Some(track) => unit_result(id, player.set_subtitle_track(track)),
             None => failure(id, "invalid_params", "A track id is required".to_string()),
         },
+        "player.setSubtitleStyle" => match subtitle_style_from(&request.params) {
+            Some(style) => unit_result(id, player.set_subtitle_style(style)),
+            None => failure(
+                id,
+                "invalid_params",
+                "A subtitle style is required".to_string(),
+            ),
+        },
         "player.stop" => {
             player.stop();
             success(id, json!({ "stopped": true }))
@@ -1976,6 +1984,7 @@ pub fn handle(raw: &str, state: &mut AppState) -> Vec<OutboundMessage> {
         | "player.setResizeMode"
         | "player.setAudioTrack"
         | "player.setSubtitleTrack"
+        | "player.setSubtitleStyle"
         | "player.stop" => state
             .player
             .lock()
@@ -2236,6 +2245,43 @@ fn player_request_headers(params: &Value) -> anyhow::Result<Vec<String>> {
     Ok(output)
 }
 
+/// Reads a caption style off an IPC request.
+///
+/// Every field is required rather than defaulted: a partial style would leave
+/// the rest of mpv's subtitle properties at whatever the last file set, so a
+/// missing colour would read as "keep the old one" in some situations and
+/// "black" in others. The UI always sends the whole set.
+///
+/// `use_libass` is deliberately not taken from the WebView. It decides whether
+/// styled ASS tracks keep their own formatting, which is an account setting
+/// applied when the file opens — not something the caption panel changes.
+fn subtitle_style_from(params: &Value) -> Option<crate::player::SubtitleStyle> {
+    let color = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| value.starts_with('#'))
+            .map(str::to_string)
+    };
+    Some(crate::player::SubtitleStyle {
+        font_size: params.get("fontSize").and_then(Value::as_i64)?.clamp(6, 40),
+        bold: params.get("bold").and_then(Value::as_bool)?,
+        text_color: color("textColor")?,
+        background_color: color("backgroundColor")?,
+        outline_enabled: params.get("outlineEnabled").and_then(Value::as_bool)?,
+        outline_color: color("outlineColor")?,
+        outline_width: params
+            .get("outlineWidth")
+            .and_then(Value::as_i64)?
+            .clamp(0, 10),
+        bottom_offset: params
+            .get("bottomOffset")
+            .and_then(Value::as_i64)?
+            .clamp(0, 100),
+        use_libass: false,
+    })
+}
+
 fn unit_result(id: String, result: anyhow::Result<()>) -> ResponseEnvelope {
     match result {
         Ok(()) => success(id, json!({ "ok": true })),
@@ -2398,6 +2444,59 @@ mod tests {
         assert_eq!(response.id, "42");
         assert!(response.ok);
         assert_eq!(response.result.as_ref().unwrap()["roundTrip"], 1);
+    }
+
+    #[test]
+    fn a_caption_style_is_taken_whole_or_not_at_all() {
+        let complete = json!({
+            "fontSize": 22,
+            "bold": true,
+            "textColor": "#FFFFEB3B",
+            "backgroundColor": "#66000000",
+            "outlineEnabled": true,
+            "outlineColor": "#FF000000",
+            "outlineWidth": 3,
+            "bottomOffset": 15,
+        });
+        let style = subtitle_style_from(&complete).expect("a complete style is accepted");
+        assert_eq!(style.font_size, 22);
+        assert_eq!(style.text_color, "#FFFFEB3B");
+        assert_eq!(style.bottom_offset, 15);
+        // Not the WebView's to decide: whether styled ASS keeps its own
+        // formatting is settled when the file opens.
+        assert!(!style.use_libass);
+
+        // Anything missing is refused rather than defaulted, or the properties
+        // it does not mention keep whatever the last file left behind.
+        for absent in [
+            "fontSize",
+            "bold",
+            "textColor",
+            "backgroundColor",
+            "outlineEnabled",
+            "outlineColor",
+            "outlineWidth",
+            "bottomOffset",
+        ] {
+            let mut partial = complete.clone();
+            partial.as_object_mut().unwrap().remove(absent);
+            assert!(
+                subtitle_style_from(&partial).is_none(),
+                "a style with no {absent} must be refused",
+            );
+        }
+
+        // A colour has to look like one; a number is held to what mpv accepts.
+        let mut wrong = complete.clone();
+        wrong.as_object_mut().unwrap()["textColor"] = json!("red");
+        assert!(subtitle_style_from(&wrong).is_none());
+
+        let mut huge = complete.clone();
+        huge.as_object_mut().unwrap()["fontSize"] = json!(4000);
+        huge.as_object_mut().unwrap()["bottomOffset"] = json!(-20);
+        let clamped = subtitle_style_from(&huge).expect("clamped rather than refused");
+        assert_eq!(clamped.font_size, 40);
+        assert_eq!(clamped.bottom_offset, 0);
     }
 
     #[test]

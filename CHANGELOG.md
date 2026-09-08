@@ -4,6 +4,8 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+- Added caption styling to the player: Subtitles now has a Customise page for size, position, colour, background, outline and bold, applied to what is on screen as you change it. It reads and writes the same settings as the appearance page, so a change made either way is the same change.
+
 ## [0.1.0-alpha.6] - 2026-09-06
 
 - The interface is now the same one the web app uses, so a fix made in either place appears in both. Everything below comes with it.

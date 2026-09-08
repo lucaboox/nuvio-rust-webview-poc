@@ -31,6 +31,7 @@ import type {
   PlayerState,
   RequestOptions,
   RequestResponse,
+  SubtitleStyle,
 } from "../shared-ui/src/platform/types.ts";
 
 export type * from "../shared-ui/src/platform/types.ts";
@@ -189,6 +190,16 @@ const player = {
     invoke<unknown>("player.setAudioTrack", { id }).then(() => undefined),
   setSubtitleTrack: (id: number) =>
     invoke<unknown>("player.setSubtitleTrack", { id }).then(() => undefined),
+  /*
+   * How captions look, restated while a file is playing.
+   *
+   * A browser restyles its own cues with a stylesheet; mpv draws subtitles
+   * itself and only changes when it is told. The whole set goes every time —
+   * a partial style would leave the rest of mpv's subtitle properties at
+   * whatever the last file set.
+   */
+  setSubtitleStyle: (style: SubtitleStyle) =>
+    invoke<unknown>("player.setSubtitleStyle", { ...style }).then(() => undefined),
   setFullscreen: (fullscreen: boolean) =>
     invoke<unknown>("window.setFullscreen", { enabled: fullscreen }).then(() => undefined),
   stop: () => invoke<unknown>("player.stop").then(() => undefined),
