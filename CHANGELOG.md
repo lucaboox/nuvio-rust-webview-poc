@@ -4,7 +4,19 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
-- Added caption styling to the player: Subtitles now has a Customise page for size, position, colour, background, outline and bold, applied to what is on screen as you change it. It reads and writes the same settings as the appearance page, so a change made either way is the same change.
+## [0.1.0-alpha.7] - 2026-09-08
+
+- The player's settings are now one cog, holding a list you step into and back out of: subtitles, audio track, playback speed, Stable Volume and HDR. Each row says what it is set to without opening it. Playback speed has left the control bar for that list, and volume has moved to the left beside play.
+- Added caption styling to the player. Subtitles now has a Customise page for size, position, colour, background, outline and bold, applied to what is on screen as you change it. It reads and writes the same settings as the appearance page, so a change made either way is the same change.
+- Added a source picker to the player. Swap to a different release without leaving playback; it keeps your position, and shows which one is playing.
+- Added a random episode picker to a show's page, with its own settings for including watched episodes and specials.
+- Tooltips and dropdown lists are drawn by Nuvio instead of by Windows, so they match the rest of the application rather than appearing as pale boxes and white lists in the middle of it.
+- The episode list inside the player now matches the one on the show's page: the same rows, the same IMDb scores, and the season it is showing named above them.
+- Search results are named by the catalog that found them — "Search • Movies | 5" — catalogs that found nothing are no longer listed, and when none of them find anything that is said once.
+- Poster size is now a single percentage with a reset, so cards keep their shape, and it applies everywhere including the home screen. The default is back to its original size.
+- Leaving playback returns to the page you came from rather than to the list of sources you had just chosen from, and the source sheet's way out is the back arrow in the top-left corner, as everywhere else.
+- A long season no longer slows the show's page: only the episodes on screen are drawn.
+- Fixed a run of interface faults: the play hint in the middle of the picture no longer covers a playing film, the panels and menus over the picture share one colour, and picking a source no longer leaves the sheet open behind the player.
 
 ## [0.1.0-alpha.6] - 2026-09-06
 
