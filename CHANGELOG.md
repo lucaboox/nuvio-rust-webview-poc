@@ -4,6 +4,16 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-09-09
+
+- Added controller navigation throughout the desktop interface and native player, including reliable focus inside menus and dropdowns, player shortcuts, and clearer source selection. Forward and back mouse buttons now navigate the WebView too.
+- Improved native-player cleanup and compositing. The WebView becomes transparent only when libmpv has a video frame ready and is restored when playback closes, fails, changes source, or the app exits, preventing stale audio and see-through browsing screens.
+- Seek previews now use one persistent libmpv thumbnail worker with two-second buckets, cached and nearest-frame previews, and the same request headers and cookies as playback.
+- Added click-to-pause to the embedded desktop player and restyled its center play/pause feedback with a translucent background.
+- Add-on Configure and Edit actions now open correctly in the system's default browser.
+- Improved custom dropdowns, tooltips, subtitle timing and native caption styling in the shared interface.
+- The browser HDR control is now disabled during canvas fallback playback, making it clear when HDR output is unavailable.
+
 ## [0.1.0-alpha.7] - 2026-09-08
 
 - The player's settings are now one cog, holding a list you step into and back out of: subtitles, audio track, playback speed, Stable Volume and HDR. Each row says what it is set to without opening it. Playback speed has left the control bar for that list, and volume has moved to the left beside play.

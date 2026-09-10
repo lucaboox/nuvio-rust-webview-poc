@@ -14,7 +14,10 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage},
 };
 
-use super::{PlayerState, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages};
+use super::{
+    PlayerState, PlayerSurface, PlayerTrack, ResizeMode, SubtitleStyle, TrackLanguages,
+    encode_request_headers,
+};
 
 const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15);
 const MPV_EVENT_FILE_LOADED: i32 = 8;
@@ -253,6 +256,8 @@ pub fn launch(
     rtx_super_resolution: bool,
     state: Arc<Mutex<PlayerState>>,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
+    surface: PlayerSurface,
+    surface_generation: u64,
 ) -> Result<PlayerRuntime> {
     let commands = PlayerCommands::default();
     let player_commands = commands.clone();
@@ -272,6 +277,8 @@ pub fn launch(
                 &state,
                 player_commands,
                 on_progress,
+                &surface,
+                surface_generation,
             ) {
                 if let Ok(mut current) = state.lock() {
                     current.active = false;
@@ -280,6 +287,7 @@ pub fn launch(
                 }
                 eprintln!("embedded native player failed: {error:#}");
             }
+            surface.finish(surface_generation);
         })
         .context("could not start embedded native player thread")?;
     Ok(PlayerRuntime {
@@ -327,6 +335,8 @@ fn run_player(
     state: &Arc<Mutex<PlayerState>>,
     commands: PlayerCommands,
     on_progress: Box<dyn Fn(i64, i64, bool) + Send + 'static>,
+    surface: &PlayerSurface,
+    surface_generation: u64,
 ) -> Result<()> {
     unsafe {
         let library = Library::new(dll_path).context("could not load libmpv-2.dll")?;
@@ -482,11 +492,7 @@ fn run_player(
                 mpv_set_option_string,
                 handle,
                 "http-header-fields",
-                &request_headers
-                    .iter()
-                    .map(|header| header.replace('\\', "\\\\").replace(',', "\\,"))
-                    .collect::<Vec<_>>()
-                    .join(","),
+                &encode_request_headers(request_headers),
             )?;
         }
         let wid_name = CString::new("wid")?;
@@ -679,18 +685,23 @@ fn run_player(
                     // MPV_EVENT_PLAYBACK_RESTART occurs after playback actually
                     // has a frame ready. MPV_EVENT_FILE_LOADED is too early to
                     // reveal the surface, but is still useful for geometry.
-                    MPV_EVENT_PLAYBACK_RESTART => {
+                MPV_EVENT_PLAYBACK_RESTART => {
                         let _ = apply_picture_mode(
                             mpv_set_property_string,
                             handle,
                             current_resize_mode,
                         );
-                        if let Ok(mut current) = state.lock() {
-                            current.loading = false;
-                            current.ended = false;
-                            current.error = None;
-                        }
+                    if let Ok(mut current) = state.lock() {
+                        current.loading = false;
+                        current.ended = false;
+                        current.error = None;
                     }
+                    // Audio-only or failed files must never punch a transparent
+                    // hole through the browsing window.
+                    if get_int(mpv_get_property, handle, "vid").is_some_and(|id| id > 0) {
+                        surface.reveal(surface_generation);
+                    }
+                }
                     _ => {}
                 }
             }

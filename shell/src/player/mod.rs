@@ -1,7 +1,18 @@
 use serde::Serialize;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 mod languages;
 pub use languages::preferred_languages;
+
+pub(crate) fn encode_request_headers(request_headers: &[String]) -> String {
+    request_headers
+        .iter()
+        .map(|header| header.replace('\\', "\\\\").replace(',', "\\,"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 #[allow(dead_code)]
 mod ffi;
@@ -142,11 +153,96 @@ pub struct PlayerTrack {
     pub selected: bool,
 }
 
+/// Owns WebView opacity across native player sessions.
+///
+/// The generation guards against a late callback from an old source changing
+/// the surface state after a replacement source has started.
+#[derive(Clone)]
+pub struct PlayerSurface {
+    generation: Arc<AtomicU64>,
+    transparent: Arc<AtomicBool>,
+    transition: Arc<Mutex<()>>,
+    apply: Arc<dyn Fn(bool) + Send + Sync>,
+}
+
+impl PlayerSurface {
+    pub fn new(apply: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        Self {
+            generation: Arc::new(AtomicU64::new(0)),
+            // The Tauri window is created transparency-capable. Treat that as
+            // the initial state so configure_window's first cover is applied.
+            transparent: Arc::new(AtomicBool::new(true)),
+            transition: Arc::new(Mutex::new(())),
+            apply: Arc::new(apply),
+        }
+    }
+
+    fn begin(&self) -> u64 {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.set(false);
+        generation
+    }
+
+    pub(crate) fn reveal(&self, generation: u64) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.generation.load(Ordering::SeqCst) == generation {
+            self.set(true);
+        }
+    }
+
+    pub(crate) fn finish(&self, generation: u64) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self
+            .generation
+            .compare_exchange(
+                generation,
+                generation + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            self.set(false);
+        }
+    }
+
+    pub fn cover(&self) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.set(false);
+    }
+
+    fn set(&self, transparent: bool) {
+        if self.transparent.swap(transparent, Ordering::SeqCst) != transparent {
+            (self.apply)(transparent);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_transparent(&self) -> bool {
+        self.transparent.load(Ordering::SeqCst)
+    }
+}
+
 pub struct PlayerService {
     prepared_media_id: Option<String>,
     /// Kept so the thumbnailer can open the same stream independently.
     source: Option<(String, Vec<String>)>,
     parent_hwnd: isize,
+    surface: Option<PlayerSurface>,
     state: Arc<Mutex<PlayerState>>,
     #[cfg(windows)]
     runtime: Option<native::PlayerRuntime>,
@@ -158,6 +254,7 @@ impl Default for PlayerService {
             prepared_media_id: None,
             source: None,
             parent_hwnd: 0,
+            surface: None,
             state: Arc::new(Mutex::new(PlayerState {
                 volume: 100,
                 ..Default::default()
@@ -177,8 +274,10 @@ pub struct PlayerCapabilities {
 }
 
 impl PlayerService {
-    pub fn configure_window(&mut self, parent_hwnd: isize) {
+    pub fn configure_window(&mut self, parent_hwnd: isize, surface: PlayerSurface) {
         self.parent_hwnd = parent_hwnd;
+        surface.cover();
+        self.surface = Some(surface);
     }
 
     pub fn capabilities(&self) -> PlayerCapabilities {
@@ -232,6 +331,11 @@ impl PlayerService {
         }
         anyhow::ensure!(self.parent_hwnd != 0, "main window handle is unavailable");
         self.stop();
+        let surface = self
+            .surface
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("player surface is unavailable"))?;
+        let surface_generation = surface.begin();
         self.prepared_media_id = Some(media_id.clone());
         self.source = Some((url.clone(), request_headers.clone()));
         if let Ok(mut state) = self.state.lock() {
@@ -259,6 +363,8 @@ impl PlayerService {
                 rtx_super_resolution,
                 Arc::clone(&self.state),
                 on_progress,
+                surface,
+                surface_generation,
             )?);
         }
         #[cfg(not(windows))]
@@ -344,6 +450,9 @@ impl PlayerService {
     }
 
     pub fn stop(&mut self) {
+        if let Some(surface) = &self.surface {
+            surface.cover();
+        }
         #[cfg(windows)]
         if let Some(runtime) = self.runtime.take() {
             runtime.stop();
@@ -365,5 +474,69 @@ fn direct_mpv_available() -> bool {
     #[cfg(not(windows))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recording_surface() -> (PlayerSurface, Arc<Mutex<Vec<bool>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&events);
+        (
+            PlayerSurface::new(move |transparent| {
+                recorded.lock().unwrap().push(transparent);
+            }),
+            events,
+        )
+    }
+
+    #[test]
+    fn playback_and_thumbnail_headers_share_mpv_list_escaping() {
+        assert_eq!(
+            encode_request_headers(&[
+                "Cookie: expires=Wed, 09 Jun".into(),
+                "X-Path: a\\b".into(),
+            ]),
+            "Cookie: expires=Wed\\, 09 Jun,X-Path: a\\\\b"
+        );
+    }
+
+    #[test]
+    fn stale_source_callbacks_cannot_change_webview_transparency() {
+        let (surface, events) = recording_surface();
+        surface.cover();
+        let first = surface.begin();
+        surface.reveal(first);
+        assert!(surface.is_transparent());
+
+        let second = surface.begin();
+        surface.reveal(first);
+        surface.finish(first);
+        assert!(!surface.is_transparent());
+
+        surface.reveal(second);
+        assert!(surface.is_transparent());
+        surface.finish(second);
+        assert!(!surface.is_transparent());
+        assert_eq!(*events.lock().unwrap(), vec![false, true, false, true, false]);
+    }
+
+    #[test]
+    fn stopping_covers_the_surface_and_clears_the_source() {
+        let (surface, _) = recording_surface();
+        let mut player = PlayerService::default();
+        player.configure_window(42, surface.clone());
+        player.source = Some(("https://example/video".into(), vec!["Cookie: a=b".into()]));
+        player.state.lock().unwrap().active = true;
+        let session = surface.begin();
+        surface.reveal(session);
+
+        player.stop();
+
+        assert!(!surface.is_transparent());
+        assert!(player.source().is_none());
+        assert!(!player.state().active);
     }
 }

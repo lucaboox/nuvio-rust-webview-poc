@@ -16,6 +16,9 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 import { invoke } from "./bridge.ts";
+import "./desktopInput.ts";
+import "./desktop.css";
+import { installExternalLinkBridge } from "./externalLinks.ts";
 import { copyStreamUrl } from "../shared-ui/src/lib/externalPlayer.ts";
 import { deleteValue, getValue, setValue } from "../shared-ui/src/lib/idb.ts";
 import type {
@@ -35,6 +38,8 @@ import type {
 } from "../shared-ui/src/platform/types.ts";
 
 export type * from "../shared-ui/src/platform/types.ts";
+
+installExternalLinkBridge();
 
 /**
  * HTTP by way of Rust, because the webview cannot do it itself.
@@ -170,6 +175,10 @@ const player = {
       progress: source.progress,
     }).then(() => undefined),
   state: () => invoke<PlayerState>("player.state"),
+  thumbnail: (positionMs: number) =>
+    invoke<{ image?: string }>("player.thumbnail", { positionMs }).then(
+      (result) => result.image,
+    ),
   skipSegments: (options: { contentId: string; videoId: string; season?: number; episode?: number; animeSkipEnabled: boolean; animeSkipClientId: string }) =>
     invoke<{ segments: Array<{ startMs: number; endMs: number; type: string; provider: string }> }>("player.skipSegments", options).then((result) => result.segments),
   togglePause: () => invoke<unknown>("player.togglePause").then(() => undefined),

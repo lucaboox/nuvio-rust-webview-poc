@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use app_state::AppState;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, Window, WindowEvent};
+use tauri::{window::Color, AppHandle, Manager, State, Window, WindowEvent};
 
 // The webview stays transparent for the life of the window, which is how mpv —
 // drawing into a child of the same window, behind it — is visible at all.
@@ -158,7 +158,15 @@ fn main() {
                 if let Ok(state) = state.lock()
                     && let Ok(mut player) = state.player.lock()
                 {
-                    player.configure_window(hwnd);
+                    let surface_window = window.clone();
+                    let surface = player::PlayerSurface::new(move |transparent| {
+                        let window = surface_window.clone();
+                        let alpha = if transparent { 0 } else { 255 };
+                        let _ = surface_window.run_on_main_thread(move || {
+                            let _ = window.set_background_color(Some(Color(0, 0, 0, alpha)));
+                        });
+                    });
+                    player.configure_window(hwnd, surface);
                 }
             }
             Ok(())
@@ -194,6 +202,11 @@ fn main() {
                 });
             }
             if matches!(event, WindowEvent::CloseRequested { .. }) {
+                // Hide any native child surface immediately. This cannot wait
+                // for AppState: a request may currently hold that lock while
+                // the window is already disappearing.
+                let _ = window.set_background_color(Some(Color(0, 0, 0, 255)));
+
                 // Never wait for account/bootstrap I/O from the Windows close
                 // callback. This callback is on the native event loop, so a
                 // blocking AppState lock made the title-bar X appear frozen

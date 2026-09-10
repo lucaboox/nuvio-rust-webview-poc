@@ -1,0 +1,5 @@
+/* Keep the paused frame visible through the native player's center control. */
+.player-center:not(.player-center-busy) {
+  background: rgb(0 0 0 / 58%);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 48%);
+}
