@@ -302,7 +302,14 @@ impl ThumbnailDecoder {
             set_image("jpeg-quality", "80")?;
             set_image("outdir", &output_dir.to_string_lossy())?;
             set("vf", &format!("scale={THUMBNAIL_WIDTH}:-2"))?;
-            set("keep-open", "yes")?;
+            // One frame per job, stated once here rather than per capture: it
+            // never varies, and a loadfile argument is the one place it cannot
+            // safely go (see `capture`).
+            set("frames", "1")?;
+            // Deliberately not keep-open. This worker is driven by the end-file
+            // event — that is when the frame has been written and is safe to
+            // read — and keeping the file open past its last frame is exactly
+            // what would withhold that event until the capture timed out.
             set("hr-seek", "yes")?;
             set("demuxer-readahead-secs", "0")?;
             for (name, value) in [
@@ -345,11 +352,18 @@ impl ThumbnailDecoder {
             "http-header-fields",
             &crate::player::encode_request_headers(request_headers),
         )?;
-        let options = format!(
-            "start={:.3},frames=1",
-            position_ms.max(0) as f64 / 1000.0
-        );
-        self.command(&["loadfile", url, "replace", &options])?;
+        // `start` is set as a property rather than handed to loadfile, for the
+        // same reason the player sets it as an option: loadfile grew an index
+        // parameter ahead of its options string, so a positional option string
+        // lands where an integer is expected. The player's note says this
+        // silently drops the resume point on the version that does not expect
+        // them; here the whole command was refused instead, and every seek
+        // preview on this libmpv failed before a frame was ever decoded.
+        self.set_property(
+            "start",
+            &format!("{:.3}", position_ms.max(0) as f64 / 1000.0),
+        )?;
+        self.command(&["loadfile", url, "replace"])?;
 
         let deadline = Instant::now() + CAPTURE_TIMEOUT;
         loop {
@@ -496,5 +510,55 @@ mod tests {
         cache.insert(cached(1, 2, 99));
         assert_eq!(cache.frames.len(), 1);
         assert_eq!(cache.exact(frame_key(1, 2)), Some(vec![99]));
+    }
+
+    /// The pinned runtime, which `npm run prepare:runtime` puts in place.
+    fn runtime_dll() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/libmpv-2.dll")
+    }
+
+    /// A video libmpv synthesises for itself, so this needs no fixture file
+    /// and never touches the network.
+    const SYNTHETIC_SOURCE: &str =
+        "av://lavfi:testsrc=size=320x240:rate=10:duration=20";
+
+    /// One decoder, several captures — as the running app has it.
+    ///
+    /// Deliberately not split into a test per assertion. Every decoder in a
+    /// process shares one output directory and empties it before each capture,
+    /// so two of them running at once delete each other's frames; the app is
+    /// safe because `WORKER` only ever builds one, and a test that built a
+    /// second would be testing an arrangement that does not exist.
+    #[test]
+    fn the_worker_decodes_real_frames_at_the_position_asked_for() {
+        // The bug this exists for: `start` and `frames` were passed as a
+        // positional loadfile options string, which a libmpv new enough to
+        // have loadfile's index parameter reads as an index and refuses. Every
+        // preview failed with "libmpv rejected thumbnail command", and nothing
+        // in the build or the unit tests above noticed — they only ever
+        // exercised the cache. This drives the decoder itself.
+        if !runtime_dll().exists() {
+            eprintln!("skipping: run `npm run prepare:runtime` first");
+            return;
+        }
+        let mut decoder =
+            ThumbnailDecoder::new(&runtime_dll()).expect("worker should start");
+
+        let jpeg = decoder
+            .capture(SYNTHETIC_SOURCE, &[], 8_000)
+            .expect("a frame should come back");
+        // JPEG's start-of-image marker. Anything else means we read a file
+        // that was not a finished frame.
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "not a JPEG");
+        assert!(jpeg.len() > 1_000, "suspiciously small frame: {}", jpeg.len());
+
+        // The half of the fix a "did it return bytes" check would miss:
+        // `start` has to actually reach libmpv. Dropped, every position would
+        // return frame zero and the seek bar would show one still for the
+        // whole film. testsrc counts visibly upward, so two positions cannot
+        // encode to the same bytes.
+        let early = decoder.capture(SYNTHETIC_SOURCE, &[], 1_000).expect("early frame");
+        let late = decoder.capture(SYNTHETIC_SOURCE, &[], 15_000).expect("late frame");
+        assert_ne!(early, late, "start= did not reach libmpv");
     }
 }
