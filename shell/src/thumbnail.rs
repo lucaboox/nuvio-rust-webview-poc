@@ -236,6 +236,19 @@ struct MpvEventEndFile {
     error: i32,
 }
 
+/// libmpv's `MPV_END_FILE_REASON_*`, named so a log line says what happened.
+fn end_file_reason(reason: i32) -> String {
+    match reason {
+        0 => "reached the end".into(),
+        2 => "stopped".into(),
+        3 => "quit".into(),
+        4 => "error".into(),
+        5 => "redirect".into(),
+        -1 => "no end-file detail".into(),
+        other => format!("reason {other}"),
+    }
+}
+
 struct ThumbnailDecoder {
     raw: *mut c_void,
     set_property: MpvSetPropertyString,
@@ -365,7 +378,8 @@ impl ThumbnailDecoder {
         )?;
         self.command(&["loadfile", url, "replace"])?;
 
-        let deadline = Instant::now() + CAPTURE_TIMEOUT;
+        let started = Instant::now();
+        let deadline = started + CAPTURE_TIMEOUT;
         loop {
             if Instant::now() >= deadline {
                 let _ = self.command(&["stop"]);
@@ -378,13 +392,31 @@ impl ThumbnailDecoder {
             match unsafe { (*event).event_id } {
                 1 => bail!("thumbnail worker shut down"),
                 7 => {
+                    // Both halves of end-file are read, not just the error.
+                    // A source that ends for a reason rather than a fault —
+                    // a redirect, a playlist, a stop — arrives here with
+                    // error 0 and no frame written, which is indistinguishable
+                    // from a decode that quietly produced nothing unless the
+                    // reason is carried out with it.
                     let end = unsafe { (*event).data.cast::<MpvEventEndFile>() };
-                    if !end.is_null() && unsafe { (*end).error } < 0 {
-                        bail!("thumbnail source failed with libmpv error {}", unsafe {
-                            (*end).error
-                        });
+                    let (reason, error) = if end.is_null() {
+                        (-1, 0)
+                    } else {
+                        unsafe { ((*end).reason, (*end).error) }
+                    };
+                    if error < 0 {
+                        bail!(
+                            "thumbnail source failed with libmpv error {error} ({})",
+                            end_file_reason(reason)
+                        );
                     }
-                    return newest_jpeg(&self.output_dir);
+                    return newest_jpeg(&self.output_dir).with_context(|| {
+                        format!(
+                            "libmpv ended the file cleanly after {:.1}s ({})",
+                            started.elapsed().as_secs_f32(),
+                            end_file_reason(reason)
+                        )
+                    });
                 }
                 _ => {}
             }
