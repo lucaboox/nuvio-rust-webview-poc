@@ -4,6 +4,13 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-10-01
+
+- The Library page now shows how much of it you have watched: a bar and a count such as "54/112 watched" under the tabs, following the tab you are on, with the split between movies and series on All. It counts the same way the watched badge on posters does.
+- The player's controls and the cursor now hide after 2 seconds instead of 3, and they reliably do. Resuming with Space, or a video starting on its own, used to leave both on screen until the mouse moved.
+- Seek previews work again: libmpv had been refusing the request that captures them, so the timeline showed no picture.
+- Collection catalogs are no longer offered as a type in Discover.
+
 ## [0.1.0-alpha.8] - 2026-09-09
 
 - Added controller navigation throughout the desktop interface and native player, including reliable focus inside menus and dropdowns, player shortcuts, and clearer source selection. Forward and back mouse buttons now navigate the WebView too.
