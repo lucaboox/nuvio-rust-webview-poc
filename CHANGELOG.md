@@ -4,6 +4,12 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.10] - 2026-10-22
+
+- With autoplay on, playing something now shows what is happening instead of the list of sources: Finding sources, with how many addons have answered, then Picking the best source, with the countdown when there is one, then Starting stream under the player's spinner until the picture appears. The list looked like it was waiting for you to choose, and the pause before the automatic pick looked like autoplay not working. "Choose a source myself" switches to the list at any time, and if nothing matches your autoplay rules the list appears with a note saying so.
+- Scrolling a catalog or Discover keeps loading instead of stopping at an error. Pages are requested a little apart, each starts where the addon's last page ended, and a page that still fails keeps what loaded and offers Retry at the bottom.
+- Addons that rate limit, such as AIOMetadata, are handled as one: a refusal pauses that addon for every request waiting on it instead of each one retrying on its own. Title details are kept for the session, so Continue Watching and the calendar ask for far less, and a rating poster that fails falls back to the plain poster instead of going blank.
+
 ## [0.1.0-alpha.9] - 2026-10-01
 
 - The Library page now shows how much of it you have watched: a bar and a count such as "54/112 watched" under the tabs, following the tab you are on, with the split between movies and series on All. It counts the same way the watched badge on posters does.
