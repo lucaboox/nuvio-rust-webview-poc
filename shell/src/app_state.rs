@@ -138,9 +138,53 @@ impl AppState {
                 .unwrap_or(1);
             self.set_active_profile_index(profile_index);
         }
-        self.timed("addons", |state| state.refresh_addons())?;
-        if let Err(error) = self.timed("settings", |state| state.refresh_settings()) {
-            eprintln!("profile settings could not be loaded: {error:#}");
+        // The addon list, the settings blob and the provider credentials all
+        // depend only on the profile, not on each other. They were fetched one
+        // after another, which put three round trips in front of the window;
+        // together they cost one.
+        let started = Instant::now();
+        let addon_profile = self.effective_addon_profile_id();
+        let profile_index = self.active_profile_index;
+        let auth = &self.auth;
+        let (addons, settings, credentials) = std::thread::scope(|scope| {
+            let addons = scope.spawn(|| auth.addons(addon_profile));
+            let credentials =
+                scope.spawn(|| crate::settings::load_provider_credentials(auth, profile_index));
+            let settings = crate::settings::load(auth, profile_index);
+            (
+                addons.join().unwrap_or_else(|_| Err(anyhow::anyhow!("addon load panicked"))),
+                settings,
+                credentials
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("credential load panicked"))),
+            )
+        });
+        self.boot_timings.push(("accountData", started.elapsed().as_millis()));
+        self.addons = addons?;
+        self.content.lock().unwrap().invalidate();
+        self.invalidate_home_layout();
+        self.settings_snapshot = None;
+        self.settings_blob = None;
+        self.provider_credentials = None;
+        self.settings_loaded_at = None;
+        self.metadata_config = MetadataConfig::default();
+        match settings {
+            Ok((snapshot, blob)) => {
+                match credentials {
+                    Ok(credentials) => {
+                        self.metadata_config =
+                            crate::settings::metadata_config_from_blob(&blob, &credentials);
+                        self.provider_credentials = Some(credentials);
+                    }
+                    Err(error) => {
+                        eprintln!("provider credentials could not be loaded: {error:#}");
+                    }
+                }
+                self.settings_loaded_at = Some(Instant::now());
+                self.settings_snapshot = Some(snapshot);
+                self.settings_blob = Some(blob);
+            }
+            Err(error) => eprintln!("profile settings could not be loaded: {error:#}"),
         }
         Ok(())
     }

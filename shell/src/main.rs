@@ -94,6 +94,37 @@ async fn bridge(raw: String, window: Window, app: AppHandle) -> Result<Vec<Value
 /// tears down its own runtime. Keep the async bridge responsive and isolate
 /// that work on the runtime's blocking pool.
 fn dispatch_bridge(raw: &str, shared: &SharedState) -> Vec<Value> {
+    // NUVIO_TRACE_BRIDGE=1 logs each bridge call's method, target and time to
+    // stderr, so a slow launch can be read as a timeline instead of guessed at.
+    if std::env::var_os("NUVIO_TRACE_BRIDGE").is_some() {
+        let start_ms = trace_clock().elapsed().as_millis();
+        let started = std::time::Instant::now();
+        let messages = dispatch_bridge_inner(raw, shared);
+        let label = serde_json::from_str::<Value>(raw)
+            .map(|request| {
+                let params = &request["params"];
+                let target = params["url"]
+                    .as_str()
+                    .or_else(|| params["path"].as_str())
+                    .unwrap_or("");
+                format!("{} {}", request["method"].as_str().unwrap_or("?"), target)
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "bridge {start_ms:>8} +{:>6}ms {label}",
+            started.elapsed().as_millis()
+        );
+        return messages;
+    }
+    dispatch_bridge_inner(raw, shared)
+}
+
+fn trace_clock() -> &'static std::time::Instant {
+    static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    CLOCK.get_or_init(std::time::Instant::now)
+}
+
+fn dispatch_bridge_inner(raw: &str, shared: &SharedState) -> Vec<Value> {
     if let Some(messages) = ipc::handle_network_shared(raw, shared) {
         return messages.into_iter().map(to_value).collect();
     }
