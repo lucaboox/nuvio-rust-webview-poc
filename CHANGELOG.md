@@ -4,6 +4,14 @@ Release notes for Nuvio Desktop are maintained here and published to the matchin
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-11-11
+
+- Starting up is quicker. Continue Watching is kept on your computer and shows straight away, then refreshes in the background, and only for titles old enough to have changed. It used to ask your metadata addon about every title on every launch, after the home rows had finished. The account details the app needs before showing anything are now fetched together instead of one after another.
+- Losing the connection, or the backend having a bad moment, at launch no longer drops you on the sign-in screen. You stay signed in, it retries, and if it still cannot connect it says so with a Retry button.
+- Shows from AIOMetadata now have season posters: each season is a poster you can pick in place of the season dropdown.
+- A poster still loading after a few seconds on screen switches to its backup image instead of staying blank.
+- The autoplay wait is a simpler full-screen view over the title's artwork, with a button to choose a source yourself.
+
 ## [0.1.0-alpha.10] - 2026-10-22
 
 - With autoplay on, playing something now shows what is happening instead of the list of sources: Finding sources, with how many addons have answered, then Picking the best source, with the countdown when there is one, then Starting stream under the player's spinner until the picture appears. The list looked like it was waiting for you to choose, and the pause before the automatic pick looked like autoplay not working. "Choose a source myself" switches to the list at any time, and if nothing matches your autoplay rules the list appears with a note saying so.

@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-rust-webview-poc"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "anyhow",
  "dotenvy",
