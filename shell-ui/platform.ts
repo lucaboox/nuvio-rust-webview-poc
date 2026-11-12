@@ -139,7 +139,16 @@ const auth = {
   // Restores rather than reports. `auth.state` answers with whatever session
   // is loaded, which on a fresh launch is none — the shell has to be asked to
   // rotate the stored credential first.
-  restore: () => invoke<ShellAccount>("auth.restore", { sharedUi: true }).then(toSession),
+  // `no_session` covers both nothing stored and a refresh token the backend
+  // refused. Anything else is the backend not being reached, which leaves the
+  // stored session in place and is worth asking again.
+  restore: () =>
+    invoke<ShellAccount>("auth.restore", { sharedUi: true }).then(toSession, (error) => {
+      if ((error as { code?: string }).code === "no_session") return null;
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+        retryable: true,
+      });
+    }),
   signOut: () => invoke<unknown>("auth.signOut").then(() => undefined),
   request: <T>(
     path: string,

@@ -73,7 +73,13 @@ window.__NUVIO_BRIDGE_DELIVER__ = (message) => {
   if (message.ok) {
     call.resolve(message.result);
   } else {
-    call.reject(new Error(message.error?.message ?? "Native request failed"));
+    // The code travels with the error, so a caller can tell "no session" from
+    // "could not check it".
+    call.reject(
+      Object.assign(new Error(message.error?.message ?? "Native request failed"), {
+        code: message.error?.code,
+      }),
+    );
   }
 };
 
